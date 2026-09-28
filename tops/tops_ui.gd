@@ -13,10 +13,15 @@ extends CanvasLayer
 ## 结构
 ##   Root(Control · 满屏 · 不拦截输入)
 ##     ├ TopBar      左上：存活 / 时间 / 场地   右上：玩家转速条
+##     ├ Roster      右上（顶栏下方）：**全部陀螺的真实转速**（点数条 + rpm 转/分）
 ##     ├ BottomDock  底部居中：三步流程条 + 蓄力槽 + 操作提示
 ##     ├ Toast       屏幕中上：瞬时横幅
 ##     ├ TitleScreen 全屏居中卡片：标题 + 规则 + 「开始游戏」
 ##     └ ResultScreen全屏居中卡片：名次 + 用时 + 「再来一局」
+##
+## 转速表显示的是**物理量**而不只是血条：spin 只是显示刻度，真正的自转角速度是
+## TopsSpin.omega_of(spin)（1 点 = 6 rad/s），这里再换算成 rpm = ω·60/2π 给人读。
+## 出局的陀螺不移除，只整行压暗 —— 列表一局内位置恒定，不会因为有人倒下而跳动。
 ##
 
 signal start_requested()
@@ -25,9 +30,18 @@ signal restart_requested()
 ## 步骤名（索引即步骤序号：0 开始游戏 / 1 蓄力 / 2 放陀螺 / 3 = 全部完成·对战中）
 const STEP_TITLES: Array[String] = ["开始游戏", "蓄力", "放陀螺"]
 
+## 转速表（右上角）几何：宽度固定，纵向随行数自然生长
+const ROSTER_W := 292.0
+const ROSTER_TOP := 68.0      # 让开顶栏（顶栏右侧是玩家转速条，底边约 y=51）
+const ROSTER_DIM := Color(1.0, 1.0, 1.0, 0.42)   # 出局行的压暗
+
 var _root: Control
 var _top_bar: Control
 var _bottom_dock: Control
+var _roster: PanelContainer
+var _roster_body: VBoxContainer
+## 每行控件引用：{row, dot, name, gauge, spin, rpm}（行数只增不减，隐藏多余行）
+var _roster_rows: Array[Dictionary] = []
 
 var _chip_alive: PanelContainer
 var _chip_time: PanelContainer
@@ -120,6 +134,7 @@ func _build() -> void:
 	add_child(_root)
 
 	_build_top_bar()
+	_build_roster()
 	_build_bottom_dock()
 	_build_toast()
 	_build_screens()
@@ -174,6 +189,84 @@ func _build_top_bar() -> void:
 	_spin_gauge.custom_minimum_size = Vector2(220, 12)
 	_spin_gauge.zone_visible = false
 	sv.add_child(_spin_gauge)
+
+
+## 右上角「转速表」：一局内所有陀螺的真实转速（整局行序固定，出局只压暗）
+func _build_roster() -> void:
+	_roster = PanelContainer.new()
+	_roster.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_roster.add_theme_stylebox_override("panel",
+			UiTheme.sb(UiTheme.tinted(UiTheme.C_SURFACE, 0.88), 12, UiTheme.C_BORDER, 1, true))
+	# ⚠ 贴右上角：锚点在右边，offset_left 是**相对右锚点**的负值，宽度靠两边 offset 之差撑出
+	_roster.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
+	_roster.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+	_roster.grow_vertical = Control.GROW_DIRECTION_END
+	_roster.offset_right = -UiTheme.S5
+	_roster.offset_left = -UiTheme.S5 - ROSTER_W
+	_roster.offset_top = ROSTER_TOP
+	_root.add_child(_roster)
+
+	var m := MarginContainer.new()
+	m.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	m.add_theme_constant_override("margin_left", UiTheme.S3)
+	m.add_theme_constant_override("margin_right", UiTheme.S3)
+	m.add_theme_constant_override("margin_top", 9)
+	m.add_theme_constant_override("margin_bottom", 9)
+	_roster.add_child(m)
+
+	_roster_body = VBoxContainer.new()
+	_roster_body.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_roster_body.add_theme_constant_override("separation", 6)
+	m.add_child(_roster_body)
+
+	var head := HBoxContainer.new()
+	head.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	head.add_theme_constant_override("separation", UiTheme.S2)
+	_roster_body.add_child(head)
+	head.add_child(_label("转速表", UiTheme.FS_XS, UiTheme.C_TEXT_DIM))
+	var sp := Control.new()
+	sp.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	sp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	head.add_child(sp)
+	head.add_child(_label("rpm 转/分", UiTheme.FS_XS, UiTheme.C_TEXT_MUTE))
+
+	_roster_body.add_child(_divider())
+
+
+## 一行：色点 + 名字 + 转速点条 + 点数 + 真实转速（rpm）
+func _roster_row() -> Dictionary:
+	var hb := HBoxContainer.new()
+	hb.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hb.add_theme_constant_override("separation", UiTheme.S2)
+	_roster_body.add_child(hb)
+
+	var dot := ColorRect.new()
+	dot.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	dot.custom_minimum_size = Vector2(9, 9)
+	dot.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	hb.add_child(dot)
+
+	var name_l := _label("—", UiTheme.FS_SM, UiTheme.C_TEXT_DIM)
+	name_l.custom_minimum_size = Vector2(58, 0)
+	hb.add_child(name_l)
+
+	var g := Gauge.new()
+	g.custom_minimum_size = Vector2(40, 9)
+	g.zone_visible = false
+	g.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	hb.add_child(g)
+
+	var spin_l := _label("0/100", UiTheme.FS_XS, UiTheme.C_TEXT_DIM)
+	spin_l.custom_minimum_size = Vector2(48, 0)
+	spin_l.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	hb.add_child(spin_l)
+
+	var rpm_l := _label("0", UiTheme.FS_SM, UiTheme.C_TEXT)
+	rpm_l.custom_minimum_size = Vector2(56, 0)
+	rpm_l.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	hb.add_child(rpm_l)
+
+	return {"row": hb, "dot": dot, "name": name_l, "gauge": g, "spin": spin_l, "rpm": rpm_l}
 
 
 func _build_bottom_dock() -> void:
@@ -490,6 +583,7 @@ func show_title() -> void:
 	_title_wrap.show()
 	_result_wrap.hide()
 	_top_bar.hide()
+	_roster.hide()
 	_bottom_dock.hide()
 	if _start_btn != null and _start_btn.is_inside_tree():
 		_start_btn.grab_focus()   # 键盘可达：Enter / 空格 直接开
@@ -499,6 +593,7 @@ func show_launch() -> void:
 	_title_wrap.hide()
 	_result_wrap.hide()
 	_top_bar.show()
+	_roster.show()
 	_bottom_dock.show()
 	_power_box.show()
 	set_step(1)
@@ -508,6 +603,7 @@ func show_battle() -> void:
 	_title_wrap.hide()
 	_result_wrap.hide()
 	_top_bar.show()
+	_roster.show()
 	_bottom_dock.show()
 	_power_box.hide()
 	set_step(3)
@@ -517,6 +613,7 @@ func show_result(won: bool, place: int, seconds: float, kills: int) -> void:
 	_title_wrap.hide()
 	_result_wrap.show()
 	_top_bar.hide()
+	_roster.hide()
 	_bottom_dock.hide()
 	_result_title.text = "最后还在转的是你" if won else "你的陀螺停了"
 	_result_title.add_theme_color_override("font_color",
@@ -559,6 +656,60 @@ func set_stats(alive: int, total: int, seconds: float, shrinking: bool) -> void:
 		field.add_theme_color_override("font_color", UiTheme.C_TEXT)
 		_chip_field.add_theme_stylebox_override("panel",
 				UiTheme.chip_sb(UiTheme.C_SURFACE, UiTheme.C_BORDER))
+
+
+## 刷新整张转速表。
+## entries 每行 = {name: String, color: Color, is_player: bool,
+##                 spin: float, spin_max: float, omega: float, alive: bool}
+## ⚠ omega 是**真实自转角速度**（rad/s），rpm 由它换算 —— spin 只是血条刻度，
+##   满转速 100 点 = 600 rad/s ≈ 5730 rpm；不同性格的自然衰减在这里一眼看得出来。
+func set_roster(entries: Array) -> void:
+	while _roster_rows.size() < entries.size():
+		_roster_rows.append(_roster_row())
+	for i in _roster_rows.size():
+		var row: Dictionary = _roster_rows[i]
+		var shown: bool = i < entries.size()
+		(row["row"] as Control).visible = shown
+		if not shown:
+			row["rpm_v"] = -1.0
+			continue
+
+		var e: Dictionary = entries[i]
+		var alive: bool = bool(e.get("alive", true))
+		var spin: float = float(e.get("spin", 0.0))
+		var spin_max: float = maxf(float(e.get("spin_max", 100.0)), 1.0)
+		var rpm: float = float(e.get("omega", 0.0)) * 60.0 / TAU
+		var ratio: float = clampf(spin / spin_max, 0.0, 1.0)
+		row["rpm_v"] = rpm
+
+		(row["row"] as Control).modulate = Color.WHITE if alive else ROSTER_DIM
+		(row["dot"] as ColorRect).color = e.get("color", UiTheme.C_TEXT_MUTE)
+		var nl := row["name"] as Label
+		nl.text = String(e.get("name", "—"))
+		nl.add_theme_color_override("font_color",
+				UiTheme.C_PRIMARY if bool(e.get("is_player", false)) else UiTheme.C_TEXT_DIM)
+
+		var g := row["gauge"] as Gauge
+		g.set_value(ratio)
+		g.set_fill(TopsArt.spin_color(ratio) if alive else UiTheme.C_BORDER_HI)
+
+		(row["spin"] as Label).text = "%d/%d" % [int(maxf(spin, 0.0)), int(spin_max)]
+		var rl := row["rpm"] as Label
+		rl.text = "%d" % int(roundf(maxf(rpm, 0.0)))
+		rl.add_theme_color_override("font_color",
+				TopsArt.spin_color(ratio) if alive else UiTheme.C_TEXT_MUTE)
+
+
+func is_roster_shown() -> bool:
+	return _roster.visible
+
+
+## 供断言用：当前各行的 rpm（隐藏行 / 已退场为 0 或 -1）
+func roster_rpms() -> Array:
+	var out: Array = []
+	for row in _roster_rows:
+		out.append(row.get("rpm_v", -1.0))
+	return out
 
 
 func set_spin(spin: float, spin_max: float) -> void:

@@ -26,7 +26,12 @@ const TOP_Y := 0.0
 
 ## 进动漂移强度（相对 accel 的比例）
 const DRIFT_ACCEL_RATIO := 0.16
-const DRIFT_SPEED_CAP := 0.35   # 漂移只把陀螺推到 35% 上限速度，不至于变成 AI
+## 漂移只把陀螺推到上限速度的这个比例。
+## ⚠ 2026-09-28 改：AI 撤掉主动推进后，漂移是全场**唯一**的自驱力，
+##   35% 太懒 —— 陀螺在中心慢慢磨、够不到边缘、对局拖到 90 s 以上。
+##   55% 让它们能扫到大半个场子，撞墙弹开才重新有戏（不至于变成主动 AI：
+##   漂移方向是缓慢自转的进动相位，不是朝目标的追踪）。
+const DRIFT_SPEED_CAP := 0.55
 
 var top_id: int = 0
 var archetype: StringName = &"BALANCED"
@@ -67,6 +72,10 @@ var alive: bool = true
 var kills: int = 0
 var last_hit_by: int = -1
 var wall_cooldown: float = 0.0
+## 撞完之后的「松劲」计时（秒）：>0 时 AI 不再朝对手直冲，改为绕行。
+## 没有它的话，两家 AI 会撞完立刻又全力顶上去，画面上就是黏在一起不分开
+## （实测贴身段里推进占比 100%、挤压 917 wu/s²）。
+var disengage: float = 0.0
 var contacts: int = 0
 var wall_hits: int = 0
 var last_contact: Dictionary = {}
@@ -80,6 +89,9 @@ var top_radius: float = 16.0
 ## 速度硬上限倍率（§5：封顶防「炮弹失控」）。混战中陀螺被弹性碰撞反复加速时，
 ## 强制削平到 move_speed×此值，防止逃逸出场。3D 物理解算比 2D 更弹，需要显式钳制。
 const MAX_SPEED_MULT := 1.8
+
+## 平动阻尼（1/s）。见 create() 里的说明：随「AI 撤掉主动推进」一起下调。
+const LINEAR_DAMP := 0.22
 
 # ── 进动漂移（发射后唯一的自驱力）──
 var drift_phase: float = 0.0
@@ -98,6 +110,18 @@ var model: Node3D
 const VISUAL_SPIN_RATE := 20.0
 ## 出局后倒地的角速度（rad/s）
 const FALL_RATE := 3.2
+
+## 物理临界角速度（rad/s）：ω 掉到它以下，直立自转不再稳定 → 开始摆头。
+## 由 create() 按 m / r / shape_k 算好（TopsSpin.critical_omega）。
+var omega_crit: float = 0.0
+## 视觉姿态的三个相位 —— 自转（绕自身轴）/ 进动（倾斜方位绕竖直轴转圈）/
+## 章动（叠在摆角上的小点头）。用四元数合成，见 _process。
+var _spin_angle: float = 0.0
+var _precess_phase: float = 0.0
+var _nut_phase: float = 0.0
+## 当前摆角（rad）。出局倒地时从它接着往下倒，不从直立弹回去。
+var _tilt_now: float = 0.0
+var _fall_angle: float = 0.0
 
 ## ── 出局后的退场：倒地躺一会儿 → 一边下沉一边缩小 → 从场景里清掉 ──
 const DESPAWN_HOLD := 1.20   # 倒地后停留（秒），让人看清是谁停了
@@ -132,12 +156,20 @@ static func create(arch: StringName, p_id: int) -> TopTop:
 	t.tip_mu = float(p.get("tip_mu", 0.15))
 	t.axial_inertia = TopsSpin.axial_inertia(t.mass_kg, t.radius_m, t.shape_k)
 	t.tip_r_eff = TopsSpin.tip_effective_radius(t.radius_m)
+	t.omega_crit = TopsSpin.critical_omega(t.mass_kg, t.radius_m, t.axial_inertia,
+			t.shape_k)
+	t._precess_phase = randf() * TAU   # 每颗陀螺的初始倾倒方位随机，别整整齐齐一起歪
 
 	# ── 物理：真实碰撞判断交给引擎（3D）──
 	t.gravity_scale = 0.0                       # ⚠ 水平竞技场没有重力，默认会让陀螺往下掉
 	t.can_sleep = false                         # ⚠ 睡着了 apply_force 不生效，操控/漂移会失灵
 	t.lock_rotation = true                      # 朝向自管，不让碰撞把本体打转
-	t.linear_damp = 0.80                        # 与纸面模型的阻尼保持一致
+	# 平动阻尼。⚠ 2026-09-28 改：AI 撤掉主动推进后，全场只剩发射动能 + 漂移，
+	#   0.80 会把发射初速在几秒内吃光（300 → 88 wu/s），陀螺飘到一半就停死，
+	#   再也够不到边缘（实测撞墙 0 次）、对局拖成「比谁自然寿命长」。
+	#   物理上真陀螺的平动衰减本来就慢 —— 轴尖摩擦磨的是**自转**（走 TopsSpin），
+	#   不是平动。所以降到 0.22：发射动能能撑满一局，撞墙弹开才重新玩得起来。
+	t.linear_damp = LINEAR_DAMP
 	t.angular_velocity = Vector3.ZERO
 	t.continuous_cd = true                      # 防高速穿透（Godot 4：布尔属性）
 	t.contact_monitor = true
@@ -182,17 +214,35 @@ func set_collides(on: bool) -> void:
 	collision_mask = 1 if on else 0
 
 
-## 视觉tick：活着就按转速比例自转（转速掉光就慢下来），出局则绕着尖头倒地。
-## 用 _process 而非 _physics_process —— 这是渲染表现，跟着显示帧率走。
+## 视觉tick：活着就按转速比例自转，**并在低转速下摆头 / 进动 / 章动**；
+## 出局则顺着当时倾斜的方位倒地。用 _process 而非 _physics_process ——
+## 这是渲染表现，跟着显示帧率走。
+##
+## 姿态是三层四元数合成（右乘先作用，从内到外）：
+##   q = Q(竖直轴, 进动方位 φ) · Q(水平轴, 摆角 θ) · Q(自身轴, 自转角 ψ)
+## 模型容器的原点就是**轴尖**（TopsModel 从 y=0 往上叠），所以整串旋转的支点
+## 天然落在触地点上 —— 摆头时尖头钉在原地，身子歪出去，和真陀螺一样。
 func _process(delta: float) -> void:
 	if model == null:
 		return
 	if alive:
 		var ratio: float = clampf(spin / maxf(spin_max, 1.0), 0.0, 1.0)
-		model.rotation.y += VISUAL_SPIN_RATE * ratio * delta
+		_spin_angle += VISUAL_SPIN_RATE * ratio * delta
+		var w: Dictionary = TopsSpin.wobble_state(mass_kg, radius_m, axial_inertia,
+				shape_k, omega())
+		_precess_phase += float(w["precess"]) * delta
+		_nut_phase += float(w["nut_rate"]) * delta
+		# 章动是叠在摆角上的小点头（θ 上下各 nut 幅度）
+		_tilt_now = float(w["tilt"]) + float(w["nut"]) * sin(_nut_phase)
+		model.quaternion = Quaternion(Vector3.UP, _precess_phase) \
+				* Quaternion(Vector3.RIGHT, _tilt_now) \
+				* Quaternion(Vector3.UP, _spin_angle)
 		return
-	# 出局：先倒地，再退场清出场景（只动视觉模型，刚体的 transform 交给物理服务器）
-	model.rotation.z = move_toward(model.rotation.z, PI * 0.5, FALL_RATE * delta)
+	# 出局：朝当时倾斜的方位倒下去，再退场清出场景
+	# （只动视觉模型，刚体的 transform 交给物理服务器）
+	_fall_angle = move_toward(_fall_angle, PI * 0.5, FALL_RATE * delta)
+	model.quaternion = Quaternion(Vector3.UP, _precess_phase) \
+			* Quaternion(Vector3.RIGHT, _fall_angle)
 	_dead_t += delta
 	if _dead_t < DESPAWN_HOLD:
 		return
@@ -278,6 +328,7 @@ func kill() -> void:
 	spin = 0.0
 	thrusting = false
 	boosting = false
+	_fall_angle = _tilt_now   # 从当时歪着的角度接着倒，不弹回直立
 	freeze = true
 	linear_velocity = Vector3.ZERO
 	died.emit(self)

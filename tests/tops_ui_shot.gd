@@ -6,7 +6,8 @@ extends SceneTree
 ##   "Godot_..._win64.exe" --path "D:/Tops3D" --script res://tests/tops_ui_shot.gd
 ##
 ## 产物：docs/ui_01_title.png（开始界面）· ui_02_charge.png（蓄力）
-##       ui_03_battle.png（战斗 HUD）· ui_04_result.png（结算）
+##       ui_03_battle.png（战斗 HUD）· ui_05_roster.png（对战中的转速表）
+##       ui_04_result.png（结算）
 ##
 
 const WARMUP_FRAMES := 6
@@ -38,12 +39,24 @@ func _initialize() -> void:
 		await physics_frame
 	_shot("ui_03_battle.png")
 
-	# 加速跑到分出胜负 → 结算
+	# 对战中 → 转速表（各行 rpm 已经拉开，可能有出局的被压暗）
+	# ⚠ time_scale=16 下每物理帧推进 16×dt，一局 ~50 s 只要 ~190 帧，帧数写死会跑过头
 	Engine.time_scale = 16.0
 	var guard := 0
-	while guard < 4000 and main._phase != TopsMain.Phase.RESULT:
+	while guard < 9600 and main._elapsed < 22.0 and main._phase != TopsMain.Phase.RESULT:
 		await physics_frame
 		guard += 1
+	Engine.time_scale = 1.0
+	await process_frame
+	print("[UISHOT] roster shot at elapsed = ", "%.1f" % main._elapsed, " s, phase = ", main._phase)
+	_shot("ui_05_roster.png")
+
+	# 加速跑到分出胜负 → 结算
+	Engine.time_scale = 16.0
+	var guard2 := 0
+	while guard2 < 9600 and main._phase != TopsMain.Phase.RESULT:
+		await physics_frame
+		guard2 += 1
 	Engine.time_scale = 1.0
 	await physics_frame
 	await physics_frame

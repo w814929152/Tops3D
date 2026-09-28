@@ -6,7 +6,7 @@ extends SceneTree
 ## 跑法：--headless --path D:/Tops3D --script res://tests/tops_arena_geom_check.gd
 ##
 
-const BASE_BOUND := 270.0   # BASE_RADIUS(250) + WALL_INNER_OFFSET(20)
+const BASE_BOUND := 162.0   # BASE_RADIUS(150) + WALL_INNER_OFFSET(12)，随场地改
 
 
 func _initialize() -> void:
@@ -53,6 +53,14 @@ func _initialize() -> void:
 		ok = false
 	if top_y < 1.0 or top_y > 200.0:
 		print("  [FAIL] 碗沿高度离谱（y 缩放不对）")
+		ok = false
+	# 防「碗沿写死世界单位」回归：碗沿必须随硬边界等比（TopsArena.RIM_HEIGHT_RATIO），
+	# 归一化外沿才是定值 1.446。写死 26 wu 的话，场地缩到 150 时外沿会涨到 1.70
+	# —— 碗坡占了玩法半径的一大半，取景被撑开、镜头推不近，等于白缩场地。
+	var os: float = TopsArena.outer_scale()
+	print("  归一化视觉外沿 %.3f（应 ≈ 1.446 且 ≤ 1.60）" % os)
+	if os > 1.60:
+		print("  [FAIL] 碗体视觉外沿过大 —— 碗沿高度没随场地等比，缩场地会变成深桶")
 		ok = false
 	print("  %s" % ("[PASS] 碗体几何正确" if ok else "[FAIL] 碗体几何有问题"))
 	bowl.free()

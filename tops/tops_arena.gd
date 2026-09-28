@@ -20,8 +20,13 @@ const SEGMENTS := 64
 ## 碗坡倾角（度）—— 这是「倾斜角度」的唯一来源，几何与物理共用。
 ## 14° 是肉眼舒服的浅碟；再陡就变成深桶，陀螺看起来像掉进井里。
 const SLOPE_DEG := 14.0
-## 碗沿相对平底的高度（世界单位，以 BASE_BOUND 为基准；缩圈时等比变矮）
-const WALL_TOP := 26.0
+## 碗沿相对平底的高度 = BASE_BOUND × RIM_HEIGHT_RATIO（**必须等比**，不能写死世界单位）。
+## 反例：写死 26 wu 时把场地从 250 缩到 150，碗坡的绝对宽/高（104/26）却不变，
+## 相对就变成「深桶」——视觉外沿从玩法半径的 1.45 倍涨到 1.67 倍，
+## 取景被碗壁撑开，镜头推不近，陀螺反而显得更小，正好和「缩小场地」的意图相反。
+## 基准值：BASE_BOUND=270 时碗沿高 26 wu（= 270 × 0.0963）。
+const RIM_HEIGHT_RATIO := 26.0 / 270.0
+static var WALL_TOP := 26.0   # = BASE_BOUND × RIM_HEIGHT_RATIO，build() 时按硬边界重算
 ## 碗沿顶面宽度 / 外壁厚度（归一化）
 const LIP_W := 0.025
 const SHELL_W := 0.035
@@ -68,6 +73,7 @@ const LIP_SEG := 8            # 只有「碗沿顶面」这一段上亮色，形
 ## 搭一个单位碗，返回容器节点（调用方负责 add_child + 设 scale）
 static func build(base_bound: float) -> Node3D:
 	BASE_BOUND = maxf(base_bound, 1.0)
+	WALL_TOP = BASE_BOUND * RIM_HEIGHT_RATIO   # 碗沿随场地等比，形状自相似
 	var pts: Array[Vector2] = _profile()
 	var nrm: Array[Vector2] = _point_normals(pts)
 

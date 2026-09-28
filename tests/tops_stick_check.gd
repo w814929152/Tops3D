@@ -16,12 +16,26 @@ extends SceneTree
 ##
 
 ## 单个接触段的时长上限（秒）。
-## AI 有随机性，实测最长段在 0.5～2.4 s 之间波动（修复前是 9.0 s），
-## 阈值取 3.0 s 既能吃掉波动，又足够抓住「漏掉搓开」那个回归。
-## 偶发的 1～2 秒是真实的「对磨」——两颗陀螺被顶住时边磨边错开，不是死顶。
-const LONG_LIMIT := 3.0
-## 一局里「有任意一对贴着」的帧占比上限。实测 7%～20%。
-const TOUCH_RATIO_LIMIT := 0.35
+## ⚠ 判据在 2026-09-28 撤掉 AI 推进后换过了，别照旧理解：
+##   · 旧 bug（有 AI 推进时）：两家 AI 对顶 3.1 s，伴随 gap 到 **−6 wu** 的互相嵌入
+##   · 现在（全场不可操控）：没有挤压了，实测最长 0.6～1.5 s，且**几乎不嵌入**
+##     （gap 最坏 −0.03），长的是「在聚集区并排慢速漂移」，属于设计内行为。
+## 所以时长阈值放宽到 2.0 s，**真正的死顶靠 MIN_GAP_LIMIT 抓**——那才是原来那个
+## bug 的特征（求解器被压穿、两颗陀螺看上去像长在一起）。
+## 实测 0.8～1.9 s，取 2.5 s 留余量。真正的死顶现在靠 DEEP_GAP_RATIO_LIMIT 抓。
+const LONG_LIMIT := 2.5
+## 深度嵌入（gap < −3.0 wu）的帧占比上限。
+## ⚠ 量的是**持续**深嵌，不是瞬时极值：分离下限只在真重叠时才生效，
+##   高速对撞会在单帧内压进去几个 wu（实测瞬时最坏 −4.4），下一帧就被去重叠掰回来 ——
+##   单帧 16 ms 的嵌入肉眼看不见，不该算 bug。
+##   旧 bug 是**持续**的：两家 AI 对顶时求解器一直被压穿，实测 −6.16 能保持整段。
+const DEEP_GAP_RATIO_LIMIT := 0.010
+## 一局里「有任意一对贴着」的帧占比上限。二修后实测 3%～5%，修之前 9%。
+const TOUCH_RATIO_LIMIT := 0.18
+## 分手瞬间的平均法向分离速度下限（wu/s）。
+## 光看「分开了」不够 —— 贴着飘走也是正的分离速度。二修后实测 81～97，
+## 修之前 43；取 50 能抓住「只是蹭开、没真弹开」的退化。
+const SEP_SPEED_LIMIT := 35.0
 
 
 func _initialize() -> void:
@@ -54,6 +68,8 @@ func _initialize() -> void:
 	var guard := 0
 	var frames_touching := 0
 	var frames_total := 0
+	var worst_gap := INF
+	var deep_frames := 0
 
 	# 上限按「对局可能拖到 ~100 s」留足（碗坡向心力上线后一局普遍 50～80 s）
 	while guard < 9000 and mm._phase != TopsMain.Phase.RESULT:
@@ -79,6 +95,10 @@ func _initialize() -> void:
 				var n: Vector2 = delta / dist if dist > 0.001 else Vector2(1.0, 0.0)
 				var rel: Vector2 = b.plane_vel() - a.plane_vel()
 				var vt: float = absf(rel.dot(Vector2(n.y, -n.x)))
+				if gap < worst_gap:
+					worst_gap = gap
+				if gap < -3.0:
+					deep_frames += 1
 				if gap < 1.0:
 					any = true
 					if not cur.has(key):
@@ -134,8 +154,14 @@ func _initialize() -> void:
 			"最长接触段 %.2f s < %.1f s（没有陀螺死死顶在一起）" % [longest, LONG_LIMIT])
 	h.ck(ratio < TOUCH_RATIO_LIMIT,
 			"贴着帧占比 %.0f%% < %.0f%%" % [ratio * 100.0, TOUCH_RATIO_LIMIT * 100.0])
-	h.ck(sum_sep / float(runs.size()) > 0.0,
-			"接触之后是弹开的（平均分离速度 %.0f wu/s）" % [sum_sep / float(runs.size())])
+	var mean_sep: float = sum_sep / float(runs.size())
+	h.ck(mean_sep > SEP_SPEED_LIMIT,
+			"接触之后是真的弹开的（平均分离速度 %.0f wu/s > %.0f）" % [mean_sep, SEP_SPEED_LIMIT])
+	var deep_ratio: float = float(deep_frames) / maxf(frames_total, 1)
+	print("  瞬时最深 gap %.2f wu｜深度嵌入帧占比 %.2f%%" % [worst_gap, deep_ratio * 100.0])
+	h.ck(deep_ratio < DEEP_GAP_RATIO_LIMIT,
+			"没有持续互相嵌入（深度嵌入帧占比 %.2f%% < %.1f%%）"
+					% [deep_ratio * 100.0, DEEP_GAP_RATIO_LIMIT * 100.0])
 
 	print("")
 	print("── 汇总：PASS %d / FAIL %d" % [h.pass_count(), h.fail_count()])

@@ -186,9 +186,14 @@ func _initialize() -> void:
 	h.ck(_alive(tops) < 5, "有人出局（剩 %d / 5）" % _alive(tops))
 
 	h.ck(contacts > 0, "引擎检测到 %d 次陀螺间接触" % contacts)
-	h.ck(wall_hits > 0, "引擎检测到 %d 次撞墙" % wall_hits)
+	# ⚠ 撞墙**不再**断言 > 0：碗坡把陀螺聚到中心 + 全场不可操控之后，
+	#   默认对局里没人会飞到边缘（实测 3 局有 1 局是 0 次），它已经不是不变量。
+	#   撞墙弹开的机制改由 tests/tops_wall_probe.gd 定向直撞来守。
+	print("  · 本局撞墙 %d 次（非不变量：聚集 + 无操控下可多可少）" % wall_hits)
 	var r_now: float = (main as TopsMain)._arena_radius
-	h.ck(r_now < 249.9, "场地已收缩（半径 %s < 250）" % _f1(r_now))
+	var base_r: float = mm.BASE_RADIUS
+	h.ck(r_now < base_r - 0.1,
+			"场地已收缩（半径 %s < %.0f）" % [_f1(r_now), base_r])
 	h.ck(_all_inside(tops, main as TopsMain), "收缩后没有陀螺被挤出墙外")
 
 	h.ck(spin_sum < 500.0, "总转速已下降（初始 500，现 %s）" % _f1(spin_sum))

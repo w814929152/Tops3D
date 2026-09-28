@@ -30,7 +30,10 @@ extends Node3D
 
 # 世界坐标：场地中心在 XZ 原点，半径 BASE_RADIUS。y 恒为 0。
 const CENTER := Vector2(0.0, 0.0)
-const BASE_RADIUS := 250.0
+## 场地半径（1 wu = 1 mm）：250 → 150（直径 50cm → 30cm，2026-09-28 缩小）。
+## 陀螺尺寸（13~19）不变，所以场地越小、陀螺在画面上越大、撞击越密、单局越短。
+## 改这一个数即可，碗体 / 墙段 / 取景全部跟着走（碗沿按 BASE_BOUND 等比，见 TopsArena）。
+const BASE_RADIUS := 150.0
 const TOP_Y := 0.0               # 陀螺所在水平面高度
 const TRAIL_STEP := 0.05
 const TRAIL_MAX := 16
@@ -40,7 +43,7 @@ const CAM_FOV := 55.0            # 纵向视野角（keep_aspect 默认 KEEP_HEI
 const CAM_FIT_MARGIN := 1.06     # 取景按碗外沿算，留一点边缘余量即可
 const CAM_ELEVATION_DEG := 70.0  # 仰角：90 = 纯俯视，70 = 带立体感的斜俯视，40 = 很平
 const CAM_MIN_ELEVATION_DEG := 40.0  # 再平下去视锥下边缘会翻过天顶，打到相机背后
-const CAM_MIN_DISTANCE := 120.0  # 缩到最小圈后不再继续压近，避免贴脸畸变
+const CAM_MIN_DISTANCE := 75.0   # 缩到最小圈后不再继续压近，避免贴脸畸变（随 BASE_RADIUS 等比）
 
 # 缩圈节奏（可写静态量，扫参时调它）
 static var SHRINK_START := 30.0
@@ -64,12 +67,19 @@ enum Phase { TITLE, LAUNCH, BATTLE, RESULT }
 # 缩圈靠**径向平移**墙段（改 position）而非缩放——缩放只压扁盒子、内表面几乎不动，
 # 碰撞边界与玩法半径脱节，陀螺会从「没真正收进来」的缺口溜出去。平移让碰撞面精确跟随半径。
 const WALL_SEGMENTS := 48
+const WALL_THICKNESS := 20.0     # 墙盒径向厚度（不改：它在玩法边界之外，缩场地不受影响）
 var _wall_segs: Array[StaticBody3D] = []
 ## 每段墙的基准方位角（弧度），缩圈时沿此方向重新定位到当前 _arena_radius。
 var _wall_angles: Array[float] = []
 var _tops: Array[TopTop] = []
 var _player: TopTop = null
 var _strategies: Dictionary = {}
+## 转速表：**整局固定**的名单（倒下的陀螺也留在表里，UI 只压暗不移除）。
+## 与 _tops 分开的原因：_tops 会在退场动画播完后把对象摘掉并 queue_free，
+## 而转速表要的是「这一局有谁」，所以静态信息（名字/颜色/是否玩家）先快照下来，
+## 实时数值每帧从对象读，读不到（已被释放）就按「已出局」画。
+var _roster: Array[TopTop] = []
+var _roster_data: Array[Dictionary] = []
 
 var _camera: Camera3D
 var _ui: TopsUi
@@ -152,13 +162,13 @@ func _build_world() -> void:
 func _build_wall() -> void:
 	var seg_angle := TAU / float(WALL_SEGMENTS)
 	var r := BASE_RADIUS
-	var thickness := 20.0   # 径向厚度
+	var thickness := WALL_THICKNESS
 	for i in WALL_SEGMENTS:
 		var a := seg_angle * float(i) + seg_angle * 0.5
 		var seg := StaticBody3D.new()
 		seg.add_to_group(&"wall")
-		# 盒子在半径 r+30 处（与 2D 一致，墙在场地外），沿径向摆放
-		var off := r + 30.0
+		# 盒子沿径向摆放，中心距 = _wall_offset()，内表面恰好落在硬边界上
+		var off := _wall_offset(r)
 		seg.position = Vector3(cos(a) * off, 30.0, sin(a) * off)
 		seg.rotation_degrees = Vector3(0.0, rad_to_deg(-a), 0.0)
 		var box := BoxShape3D.new()
@@ -184,6 +194,8 @@ func _reset() -> void:
 		if c is TopTop:
 			c.queue_free()
 	_tops.clear()
+	_roster.clear()
+	_roster_data.clear()
 	_strategies.clear()
 	_arena_radius = BASE_RADIUS
 	_elapsed = 0.0
@@ -206,8 +218,11 @@ func _reset() -> void:
 	var strats: Array[String] = ["player", "chase", "slam", "chase", "slam"]
 	for i in lineup.size():
 		var t := TopTop.create(lineup[i], i + 1)
-		t.spin_max = 100.0
-		t.spin = 100.0
+		# ⚠ 不要再写 t.spin_max = 100 把所有原型抹平（2026-09-28 撤掉）。
+		#   那是个平衡 bug：碰撞损耗 Δω = J_t/(k·m·r) —— RAM 又重又大，
+		#   挨一下掉的转速只有 DART 的 1/4，本就该用**更少的初始转速**（82）来换。
+		#   抹平之后制衡没了，RAM 变成严格更优：实测胜率 **90%**，DART 两个都是 0%。
+		#   恢复原型自带的 spin_max（DART 115 / BALANCED 100 / RAM 82）后三者重新互为代价。
 		# 不再手写衰减倍率：转速寿命由质量 / 半径 / 形状系数 / 轴尖摩擦推出来（TopsSpin）
 		var ang: float = _spawn_angle(i, lineup.size())
 		var p := CENTER + Vector2.from_angle(ang) * BASE_RADIUS * SPAWN_RADIUS_RATIO
@@ -225,6 +240,17 @@ func _reset() -> void:
 		_strategies[t.top_id] = strats[i]
 		if strats[i] == "player":
 			_player = t
+		# 转速表行：静态字段一次快照，spin/omega 每帧刷新
+		_roster.append(t)
+		_roster_data.append({
+			"name": "你" if strats[i] == "player" else "对手 %d" % (i + 1),
+			"color": TopsArt.top_color(t.top_id),
+			"is_player": strats[i] == "player",
+			"spin": t.spin,
+			"spin_max": t.spin_max,
+			"omega": t.omega(),
+			"alive": true,
+		})
 
 	_aim_dir = (CENTER - _player.plane_pos()).normalized()
 	_update_camera()
@@ -234,6 +260,8 @@ func _reset() -> void:
 		_ui.set_spin(_player.spin, _player.spin_max)
 		_ui.set_power(_power, false, false)
 		_ui.set_hint("")
+		_update_roster()
+		_ui.set_roster(_roster_data)
 
 
 ## 玩家永远从场地正下方（屏幕近端）进场，AI 均匀分布在其余角度
@@ -252,6 +280,8 @@ func _add_top_mesh(t: TopTop) -> void:
 
 func _physics_process(delta: float) -> void:
 	TopsRules.now = _elapsed
+	# 本帧步长：接触的「运动学」部分（弹开 / 搓开）按帧折算冲量，不能按结算间隔折算
+	TopsRules.step_dt = delta
 	# 撞墙结算要用径向方向求「接近速度」，规则层不反向依赖主场景，这里直接喂给它
 	TopsRules.ARENA_CENTER = CENTER
 	TopsRules.ARENA_RADIUS = _arena_radius
@@ -280,11 +310,12 @@ func _physics_process(delta: float) -> void:
 		return
 
 	# ── 战斗阶段 ──
+	# ⚠ 进场之后**一律没人能操控**：AI 也不再有主动推进（2026-09-28 改）。
+	# 原来只有玩家 thrusting=false、AI 每帧全力推进，看着是「AI 更聪明」，实际是
+	# **AI 自带 debuff**：推进 → drive_accel 大 → 对磨时挤压压力 N_press = m_red·a_n
+	# 也大 → 切向摩擦冲量更大 → AI 掉转速远快于躺平的玩家（玩家胜率因此畸高）。
+	# 现在所有陀螺一视同仁：发射初速 + 进动漂移 + 碗坡向心力 + 碰撞，全交给物理。
 	_elapsed += delta
-	for t in _tops:
-		if t == _player or not t.alive:
-			continue
-		TopsRules.ai_drive(t, _tops, String(_strategies[t.top_id]), CENTER)
 
 	# 贴身对磨的持续结算（body_entered 只报跃变，粘住之后就哑了）
 	TopsRules.resolve_ongoing_contacts(_tops)
@@ -404,8 +435,12 @@ func _launch(power: float) -> void:
 			pw = power
 			bonus = PERFECT_SPEED_BONUS if perfect else 1.0
 		else:
+			# ⚠ 发射是 AI 唯一的「决策」（进场后一律不可操控），方向必须撒开：
+			#   全都瞄圆心的话五颗同时挤到中心、谁也够不到边缘，
+			#   撞墙弹开那条机制就彻底死了（实测撞墙 0 次）。
+			#   ±1.2 rad（±69°）里有的直插中心、有的贴着碗壁扫一整圈。
 			var to_center: Vector2 = (CENTER - t.plane_pos()).normalized()
-			dir = to_center.rotated(randf_range(-0.6, 0.6))
+			dir = to_center.rotated(randf_range(-1.2, 1.2))
 			pw = randf_range(0.55, 1.0)
 		t.facing = dir.angle()
 		t.drift_phase = t.facing
@@ -479,9 +514,17 @@ func _update_shrink(delta: float) -> void:
 	_place_wall(_arena_radius)
 
 
+## 墙盒中心到场地中心的距离：让**内表面**恰好落在硬边界（arena_radius + WALL_INNER_OFFSET）。
+## 别再写死 r+30 —— 那是「内偏移 20 + 半厚 10」在特定厚度下的巧合值，
+## 一旦 WALL_INNER_OFFSET 随场地等比缩放，写死的 30 就会让碰撞面和玩法半径脱节
+## （墙缩进来了 → 陀螺提前撞墙；或墙外扩了 → 从缺口溜出去）。
+func _wall_offset(r: float) -> float:
+	return r + TopsRules.WALL_INNER_OFFSET + WALL_THICKNESS * 0.5
+
+
 ## 把所有墙段定位到半径 r 处（保持各自方位角不变）。y 恒为 30、scale 恒为 1。
 func _place_wall(r: float) -> void:
-	var off := r + 30.0
+	var off := _wall_offset(r)
 	for i in _wall_segs.size():
 		var a: float = _wall_angles[i]
 		_wall_segs[i].position = Vector3(cos(a) * off, 30.0, sin(a) * off)
@@ -559,11 +602,30 @@ func _fit_distance(radius: float) -> float:
 	return maxf(maxf(d_v, d_h), CAM_MIN_DISTANCE)
 
 
+## 转速表：把每个陀螺的**真实自转角速度**刷新进界面层。
+## 已被 queue_free 的对象（退场播完）读不到了，按「已出局」画成 0。
+func _update_roster() -> void:
+	for i in _roster_data.size():
+		var t: TopTop = _roster[i]
+		var row: Dictionary = _roster_data[i]
+		if is_instance_valid(t):
+			row["spin"] = t.spin
+			row["spin_max"] = t.spin_max
+			row["omega"] = t.omega()
+			row["alive"] = t.alive
+		else:
+			row["spin"] = 0.0
+			row["omega"] = 0.0
+			row["alive"] = false
+
+
 # ── HUD：数据推给界面层（中文由系统字体渲染，见 src/ui_font.gd）──
 func _update_hud() -> void:
 	if _ui == null:
 		return
 	_ui.set_stats(_alive_count(), _tops.size(), _elapsed, _elapsed > SHRINK_START)
+	_update_roster()
+	_ui.set_roster(_roster_data)
 	if _player_ok():
 		_ui.set_spin(_player.spin, _player.spin_max)
 		_ui.set_power(_power, _charging, _power >= POWER_PERFECT)

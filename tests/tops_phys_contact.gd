@@ -158,6 +158,10 @@ func _pair(speed: float, spin_a: float, spin_b: float, offset: float) -> Diction
 # ── 沙盒：一个陀螺撞墙 ──
 func _wall(speed: float) -> Dictionary:
 	_new_world()
+	# ⚠ TopTop 每帧调 TopsRules.decay(…, ARENA_RADIUS) 做硬边界兜底，静态默认 = 150
+	#   → 兜底边界在 162，比本用例的墙（内表面 190）还靠里，陀螺会被规则层先反弹、
+	#   根本摸不到墙（wall_hits 恒 0）。这里只隔离「撞墙」这一个变量，把兜底挪到远处。
+	TopsRules.ARENA_RADIUS = 500.0
 	var t := TopTop.create(&"BALANCED", 1)
 	t.spin = 100.0
 	t.accel = 0.0
@@ -301,6 +305,7 @@ func _free_world() -> void:
 	if _world != null:
 		_world.free()
 		_world = null
+	TopsRules.ARENA_RADIUS = TopsMain.BASE_RADIUS   # 还原默认，别污染后面的用例
 	await physics_frame
 
 

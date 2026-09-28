@@ -17,10 +17,22 @@ extends RefCounted
 ##   · shape_k 形状系数 I = k·m·r²：0.5≈实心盘，越大说明重量越靠外圈（飞轮）
 ##   · tip_mu  轴尖与盘面的滑动摩擦系数：尖而细的轴尖小（转得久），宽而钝的轴尖大
 ## 转速寿命差异**完全由 m / r / shape_k / tip_mu 推出来**，不再手写 decay 倍率。
+##
+## ── spin_max 是三者的**平衡砝码**，别乱改 ──
+## 碰撞损耗 Δω = J_t/(k·m·r)：RAM 又重又大，挨一下只掉 DART 的 1/4，
+## 所以必须用**更少的初始转速**来换；DART 最脆，用**最多的转速**补。
+## 两者互相制衡，任一头给多了都会翻盘（2026-09-28 实测，10 局）：
+##   · 全部归一成 100  → 制衡消失，RAM 严格更优 → **RAM 90%**、DART 0%
+##   · 原型原值 115/100/82 → 自然衰减那头压过碰撞 → **DART 40%**、RAM 0%
+## 定档 105 / 102 / 88（2026-09-28，20 局实测胜率：DART 10~20% / BAL 20~35% / RAM 15%）。
+## 调这个数字时注意**两股力量相反**，只盯着一头会来回翻盘：
+##   给多了（如全部归一成 100）→ 碰撞抗性主导 → RAM 90%
+##   给少了（如原型原值 115/100/82）→ 自然衰减主导 → DART 40%、RAM 0%
+## 自然寿命指数 = spin_max ÷ (μ /(k·r))，本档为 DART 6827 / BAL 5982 / RAM 5105。
 const ARCHETYPES: Dictionary = {
-	&"DART": {"mass": 0.7, "radius": 13.0, "max_speed": 250.0, "accel": 1000.0, "turn_rate": 5.2, "spin_max": 115.0, "decay_mult": 1.00, "shape_k": 0.50, "tip_mu": 0.10},
-	&"BALANCED": {"mass": 1.0, "radius": 16.0, "max_speed": 285.0, "accel": 700.0, "turn_rate": 4.2, "spin_max": 100.0, "decay_mult": 1.00, "shape_k": 0.55, "tip_mu": 0.15},
-	&"RAM": {"mass": 1.6, "radius": 19.0, "max_speed": 320.0, "accel": 430.0, "turn_rate": 3.0, "spin_max": 82.0, "decay_mult": 1.00, "shape_k": 0.58, "tip_mu": 0.19},
+	&"DART": {"mass": 0.7, "radius": 13.0, "max_speed": 250.0, "accel": 1000.0, "turn_rate": 5.2, "spin_max": 105.0, "decay_mult": 1.00, "shape_k": 0.50, "tip_mu": 0.10},
+	&"BALANCED": {"mass": 1.0, "radius": 16.0, "max_speed": 285.0, "accel": 700.0, "turn_rate": 4.2, "spin_max": 102.0, "decay_mult": 1.00, "shape_k": 0.55, "tip_mu": 0.15},
+	&"RAM": {"mass": 1.6, "radius": 19.0, "max_speed": 320.0, "accel": 430.0, "turn_rate": 3.0, "spin_max": 88.0, "decay_mult": 1.00, "shape_k": 0.58, "tip_mu": 0.19},
 }
 
 var id: int = 0

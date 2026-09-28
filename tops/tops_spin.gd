@@ -215,8 +215,109 @@ static func wall_domega(m_kg: float, r_m: float, I: float, omega: float,
 		u_n: float) -> float:
 	var J_n: float = (1.0 + RESTITUTION) * m_kg * maxf(0.0, u_n) * WU_TO_M * VEL_GAIN
 	var u_s: float = omega * r_m      # 轮缘相对墙面的滑动速度
-	var inv_k: float = 1.0 / maxf(m_kg, 1e-9) + r_m * r_m / maxf(I, 1e-12)
+	var 	inv_k: float = 1.0 / maxf(m_kg, 1e-9) + r_m * r_m / maxf(I, 1e-12)
 	var J_t: float = minf(MU_WALL * J_n, absf(u_s) / maxf(inv_k, 1e-9))
 	if J_t <= 1e-12 or absf(u_s) <= 1e-9:
 		return 0.0
 	return -signf(u_s) * J_t * r_m / maxf(I, 1e-12)
+
+
+# ══════════════════════════════════════════════════════════
+# 五、低转速失稳：摆头 / 进动 / 章动
+# ══════════════════════════════════════════════════════════
+##
+## 真陀螺不是「越慢越歪」地匀速退化，中间有一道**门槛**：转速高于临界值时它是
+## 「睡着」的（轴立得笔直、肉眼看不见晃），掉到临界值以下，直立自转这个解不再
+## 稳定，于是三件事一起冒出来：
+##
+##   ① 摆头     倾斜角 θ 从零长起来，越接近停转越大，最后哗啦一声倒下
+##   ② 进动     倾斜的方位绕竖直轴慢慢转圈，Ω = m·g·d / (I·ω)
+##              **转得越慢，摆得越快** —— 这就是陀螺临停前越晃越急的原因
+##   ③ 章动     叠在进动上的小「点头」，频率 ≈ (I_z/I_x)·ω
+##
+## ── 临界转速（睡陀螺稳定性判据）──
+##   ω_c = 2·sqrt(I_x · m · g · d) / I_z
+## I_x 与 I_z 都 ∝ m → **质量照样约掉**（和文件头结论 1 同一个道理：重力矩 ∝ m，
+## 惯量也 ∝ m），于是 ω_c ∝ 1/(k·√r)：外圈配重（k 大）、个头大（r 大）的陀螺更稳、
+## 更晚开始晃。16 mm 的 BALANCED 算出来 ω_c ≈ 68 rad/s ≈ 11 点转速 —— 真陀螺
+## 确实只在最后那几秒才晃，摆起来到停掉往往不到十秒。
+##
+## ⚠ 这一节只回答「**看上去什么样**」：纯视觉，不参与任何规则判定，也不改转速损耗。
+##   低转速对**转速**的影响走的是 instability()（轴尖刮擦加重），两条路各管各的。
+
+## 质心离地高度 / 陀螺半径：七层模型叠出来的重心大致在这个位置（尖头触地起算）
+const COM_H_RATIO := 0.72
+
+# ── 视觉参数（只影响画面，不影响物理）──
+const WOBBLE_RESIDUAL_DEG := 1.2   # 永远存在的残余不平衡（真陀螺不可能绝对对称）
+const WOBBLE_MAX_DEG := 24.0       # 接近停转时的摆角上限
+## 摆头「提前量」：严格按 ω_c 的话，16 mm 陀螺要到 11 点转速才开始晃，
+## 画面上往往只闪两三秒就看不到了。乘 1.5 只是让失稳**提前可见**，
+## 临界转速本身（critical_omega）保持物理原值不变。
+const WOBBLE_ONSET_GAIN := 1.5
+const WOBBLE_PRECESS_CAP := 6.5    # 进动角速度上限（rad/s）：再快就频闪，看不出在转圈
+const WOBBLE_NUT_CAP := 9.0        # 章动频率上限（同上，真值 ≈ ω，快到没法画）
+const WOBBLE_NUT_RATIO := 0.35     # 章动幅度 / 摆角
+
+
+## 质心离轴尖的高度（m）
+static func com_height(r_m: float) -> float:
+	return r_m * COM_H_RATIO
+
+
+## 绕**接触点**的横向转动惯量 I_x = ½·k·m·r² + m·d²（平行轴定理）。
+## 陀螺是绕轴尖倾倒的，支点不在质心 —— 这一项的 m·d² 不能省。
+static func transverse_inertia(m_kg: float, r_m: float, shape_k: float,
+		d_m: float) -> float:
+	return 0.5 * shape_k * m_kg * r_m * r_m + m_kg * d_m * d_m
+
+
+## 临界自转角速度（rad/s）：ω > ω_c 直立稳定，ω < ω_c 开始摆头。
+## 与质量无关（分子分母的 m 约掉）：ω_c = 2·sqrt(0.72·g·(½k + 0.72²)) / (k·√r)
+static func critical_omega(m_kg: float, r_m: float, I_axial: float,
+		shape_k: float) -> float:
+	if I_axial <= 1e-12:
+		return 0.0
+	var d: float = com_height(r_m)
+	var I_t: float = transverse_inertia(m_kg, r_m, shape_k, d)
+	return 2.0 * sqrt(maxf(I_t * m_kg * G * d, 0.0)) / I_axial
+
+
+## 进动角速度 Ω = m·g·d / (I_z·ω)（rad/s，未加上限）。转得越慢 → 摆得越快。
+static func precession_rate(m_kg: float, d_m: float, I_axial: float,
+		omega: float) -> float:
+	return m_kg * G * d_m / (maxf(I_axial, 1e-12) * maxf(absf(omega), 1e-6))
+
+
+## 章动角频率 ≈ (I_z / I_x)·ω（rad/s，未加上限）
+static func nutation_rate(I_axial: float, I_trans: float, omega: float) -> float:
+	return absf(omega) * I_axial / maxf(I_trans, 1e-12)
+
+
+## 一套完整的低转速姿态（纯数值，渲染层照着摆就行）。返回：
+##   tilt     摆角（rad，已含残余不平衡与章动以外的静态部分）
+##   nut      章动幅度（rad）：叠在摆角上的小点头
+##   precess  进动角速度（rad/s，已加视觉上限）
+##   nut_rate 章动角频率（rad/s，已加上限）
+##   omega_c  物理临界角速度（rad/s）
+##   onset    摆头起始角速度（rad/s）= ω_c × WOBBLE_ONSET_GAIN
+static func wobble_state(m_kg: float, r_m: float, I_axial: float, shape_k: float,
+		omega: float) -> Dictionary:
+	var wc: float = critical_omega(m_kg, r_m, I_axial, shape_k)
+	var onset: float = wc * WOBBLE_ONSET_GAIN
+	# x：离失稳还有多远（1 = 稳稳睡着，0 = 停转）。u = 1 - x 就是失稳度。
+	var x: float = clampf(absf(omega) / maxf(onset, 1e-6), 0.0, 1.0)
+	var u: float = 1.0 - x
+	# 摆角按 u² 长：刚过门槛时几乎看不出，越接近停转窜得越快（真陀螺就这样）
+	var amp_deg: float = WOBBLE_RESIDUAL_DEG \
+			+ (WOBBLE_MAX_DEG - WOBBLE_RESIDUAL_DEG) * u * u
+	var d: float = com_height(r_m)
+	var I_t: float = transverse_inertia(m_kg, r_m, shape_k, d)
+	return {
+		"tilt": deg_to_rad(amp_deg),
+		"nut": deg_to_rad(amp_deg * WOBBLE_NUT_RATIO),
+		"precess": minf(precession_rate(m_kg, d, I_axial, omega), WOBBLE_PRECESS_CAP),
+		"nut_rate": minf(nutation_rate(I_axial, I_t, omega), WOBBLE_NUT_CAP),
+		"omega_c": wc,
+		"onset": onset,
+	}
