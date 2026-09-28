@@ -1,0 +1,18 @@
+# Godot 4：编辑器缓存与导入产物（下次打开会自动重建）
+.godot/
+*.tmp
+
+# 导出配置（可能含签名密钥/路径，不入库）
+export.cfg
+export_presets.cfg
+
+# 本机工作数据（AI 会话记忆等）
+.workbuddy/
+
+# 临时诊断日志
+*.log
+
+# 系统垃圾
+.DS_Store
+Thumbs.db
+desktop.ini
