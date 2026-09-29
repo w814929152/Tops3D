@@ -23,6 +23,10 @@ extends CanvasLayer
 ## TopsSpin.omega_of(spin)（1 点 = 6 rad/s），这里再换算成 rpm = ω·60/2π 给人读。
 ## 出局的陀螺不移除，只整行压暗 —— 列表一局内位置恒定，不会因为有人倒下而跳动。
 ##
+## 每行还会显示**质量（克）**：质量是这一版的平衡主轴（惯量 I = k·m·r² 决定起手转速，
+## 碰撞损耗 Δω ∝ 1/(k·m·r) 决定抗撞），不显示出来玩家就看不懂「为什么重的起手慢、
+## 挨打却掉得少」。克 = mass_kg×1000（1 质量单位 = 50 g），与真实战斗陀螺同量级。
+##
 
 signal start_requested()
 signal restart_requested()
@@ -31,7 +35,8 @@ signal restart_requested()
 const STEP_TITLES: Array[String] = ["开始游戏", "蓄力", "放陀螺"]
 
 ## 转速表（右上角）几何：宽度固定，纵向随行数自然生长
-const ROSTER_W := 292.0
+## 292 → 338 是为了塞进「质量」那一列（44 px + 间距）
+const ROSTER_W := 338.0
 const ROSTER_TOP := 68.0      # 让开顶栏（顶栏右侧是玩家转速条，底边约 y=51）
 const ROSTER_DIM := Color(1.0, 1.0, 1.0, 0.42)   # 出局行的压暗
 
@@ -40,7 +45,7 @@ var _top_bar: Control
 var _bottom_dock: Control
 var _roster: PanelContainer
 var _roster_body: VBoxContainer
-## 每行控件引用：{row, dot, name, gauge, spin, rpm}（行数只增不减，隐藏多余行）
+## 每行控件引用：{row, dot, name, mass, gauge, spin, rpm}（行数只增不减，隐藏多余行）
 var _roster_rows: Array[Dictionary] = []
 
 var _chip_alive: PanelContainer
@@ -49,6 +54,7 @@ var _chip_field: PanelContainer
 
 var _spin_gauge: Gauge
 var _spin_value: Label
+var _mass_value: Label
 
 var _steps: Array[PanelContainer] = []
 var _power_box: VBoxContainer
@@ -184,6 +190,10 @@ func _build_top_bar() -> void:
 	sh.add_child(_label("转速", UiTheme.FS_XS, UiTheme.C_TEXT_DIM))
 	_spin_value = _label("100 / 100", UiTheme.FS_SM, UiTheme.C_TEXT)
 	sh.add_child(_spin_value)
+	# 质量紧随转速：这一版的平衡主轴就是质量（起手转速 ∝ 1/√I、抗撞 ∝ m），
+	# 玩家得能一眼看到自己这颗是轻是重，才知道该硬碰还是绕着走。
+	_mass_value = _label("50 g", UiTheme.FS_XS, UiTheme.C_TEXT_MUTE)
+	sh.add_child(_mass_value)
 
 	_spin_gauge = Gauge.new()
 	_spin_gauge.custom_minimum_size = Vector2(220, 12)
@@ -228,7 +238,7 @@ func _build_roster() -> void:
 	sp.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	sp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	head.add_child(sp)
-	head.add_child(_label("rpm 转/分", UiTheme.FS_XS, UiTheme.C_TEXT_MUTE))
+	head.add_child(_label("重量 · rpm 转/分", UiTheme.FS_XS, UiTheme.C_TEXT_MUTE))
 
 	_roster_body.add_child(_divider())
 
@@ -250,6 +260,12 @@ func _roster_row() -> Dictionary:
 	name_l.custom_minimum_size = Vector2(58, 0)
 	hb.add_child(name_l)
 
+	# 质量列：整局不变，所以一次写好就不再动（压暗由整行 modulate 统一处理）
+	var mass_l := _label("—", UiTheme.FS_XS, UiTheme.C_TEXT_MUTE)
+	mass_l.custom_minimum_size = Vector2(44, 0)
+	mass_l.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	hb.add_child(mass_l)
+
 	var g := Gauge.new()
 	g.custom_minimum_size = Vector2(40, 9)
 	g.zone_visible = false
@@ -266,7 +282,8 @@ func _roster_row() -> Dictionary:
 	rpm_l.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	hb.add_child(rpm_l)
 
-	return {"row": hb, "dot": dot, "name": name_l, "gauge": g, "spin": spin_l, "rpm": rpm_l}
+	return {"row": hb, "dot": dot, "name": name_l, "mass": mass_l,
+			"gauge": g, "spin": spin_l, "rpm": rpm_l}
 
 
 func _build_bottom_dock() -> void:
@@ -660,7 +677,8 @@ func set_stats(alive: int, total: int, seconds: float, shrinking: bool) -> void:
 
 ## 刷新整张转速表。
 ## entries 每行 = {name: String, color: Color, is_player: bool,
-##                 spin: float, spin_max: float, omega: float, alive: bool}
+##                 spin: float, spin_max: float, omega: float, alive: bool,
+##                 mass_g: float}
 ## ⚠ omega 是**真实自转角速度**（rad/s），rpm 由它换算 —— spin 只是血条刻度，
 ##   满转速 100 点 = 600 rad/s ≈ 5730 rpm；不同性格的自然衰减在这里一眼看得出来。
 func set_roster(entries: Array) -> void:
@@ -689,6 +707,13 @@ func set_roster(entries: Array) -> void:
 		nl.add_theme_color_override("font_color",
 				UiTheme.C_PRIMARY if bool(e.get("is_player", false)) else UiTheme.C_TEXT_DIM)
 
+		# 质量整局不变，只在文本真的不同时才写（避免每帧白造字符串）
+		var ml := row["mass"] as Label
+		var g_txt: String = "%d g" % int(roundf(float(e.get("mass_g", 0.0))))
+		if ml.text != g_txt:
+			ml.text = g_txt
+		row["mass_g"] = float(e.get("mass_g", 0.0))
+
 		var g := row["gauge"] as Gauge
 		g.set_value(ratio)
 		g.set_fill(TopsArt.spin_color(ratio) if alive else UiTheme.C_BORDER_HI)
@@ -712,11 +737,29 @@ func roster_rpms() -> Array:
 	return out
 
 
+## 供断言用：当前各行显示的质量（克，隐藏行为 -1）
+func roster_masses() -> Array:
+	var out: Array = []
+	for row in _roster_rows:
+		out.append(row.get("mass_g", -1.0))
+	return out
+
+
 func set_spin(spin: float, spin_max: float) -> void:
 	var ratio: float = clampf(spin / maxf(spin_max, 1.0), 0.0, 1.0)
 	_spin_gauge.set_value(ratio)
 	_spin_gauge.set_fill(TopsArt.spin_color(ratio))
 	_spin_value.text = "%d / %d" % [int(maxf(spin, 0.0)), int(spin_max)]
+
+
+## 玩家这颗陀螺的质量（克）。整局不变，发射前就会写一次。
+func set_mass(mass_g: float) -> void:
+	_mass_value.text = "%d g" % int(roundf(maxf(mass_g, 0.0)))
+
+
+## 供断言用：玩家 HUD 上显示的质量文本
+func player_mass_text() -> String:
+	return _mass_value.text
 
 
 func set_power(p: float, charging: bool, perfect: bool) -> void:

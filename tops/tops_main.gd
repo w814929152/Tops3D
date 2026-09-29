@@ -264,6 +264,10 @@ func _reset() -> void:
 			"spin_max": t.spin_cap,
 			"omega": t.omega(),
 			"alive": true,
+			# 质量（克）：1 质量单位 = 50 g → DART 35 g / BALANCED 50 g / RAM 80 g。
+			# 它是**静态字段**（整局不变），只在 _reset 里快照一次。
+			# 界面显示克而不是游戏单位：真实战斗陀螺就是 30~80 g 这个量级，比「1.6」直观。
+			"mass_g": t.mass_kg * 1000.0,
 		})
 
 	_aim_dir = (CENTER - _player.plane_pos()).normalized()
@@ -272,6 +276,7 @@ func _reset() -> void:
 		_ui.show_title()
 		_ui.set_stats(_alive_count(), _tops.size(), 0.0, false)
 		_ui.set_spin(_player.spin, _player.spin_cap)
+		_ui.set_mass(_player.mass_kg * 1000.0)
 		_ui.set_power(_power, false, false)
 		_ui.set_hint("")
 		_update_roster()
@@ -642,6 +647,7 @@ func _update_hud() -> void:
 	_ui.set_roster(_roster_data)
 	if _player_ok():
 		_ui.set_spin(_player.spin, _player.spin_cap)
+		_ui.set_mass(_player.mass_kg * 1000.0)
 		_ui.set_power(_power, _charging, _power >= POWER_PERFECT)
 	match _phase:
 		Phase.TITLE:

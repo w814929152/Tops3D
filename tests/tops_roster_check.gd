@@ -62,6 +62,32 @@ func _initialize() -> void:
 			maxes.append(sm)
 	h.ck(maxes.size() >= 2, "原型转速上限未被抹平（本局有 %d 档：%s）" % [maxes.size(), str(maxes)])
 
+	h.suite("质量也显示在转速表上（克，不是游戏单位）")
+	var masses: Array = ui.roster_masses()
+	h.eq(masses.size(), 5, "转速表 5 行都有质量")
+	for i in masses.size():
+		var t: TopTop = main._roster[i]
+		var want_g: float = t.mass_kg * 1000.0
+		h.ck(absf(float(masses[i]) - want_g) < 0.51,
+				"第 %d 行质量 = %.0f g（= 质量 %.2f × 50 g）"
+						% [i + 1, float(masses[i]), t.mass])
+	# 玩家是 BALANCED：质量从 ARCHETYPES 反推，别写死 50
+	var bal_g: float = float(TopBody.ARCHETYPES[&"BALANCED"]["mass"]) \
+			* TopsSpin.MASS_UNIT_KG * 1000.0
+	h.ck(absf(float(masses[0]) - bal_g) < 0.51,
+			"玩家行质量 = BALANCED 的 %.0f g" % bal_g)
+	h.ck(ui.player_mass_text() == "%d g" % int(roundf(bal_g)),
+			"玩家 HUD 上也显示质量（%s）" % ui.player_mass_text())
+	# 防「抹平质量」回归：三个原型的重量必须不同，否则惯性/抗撞的制衡就没了
+	var distinct: Array = []
+	for v in masses:
+		var vv: float = float(v)
+		if not distinct.has(vv):
+			distinct.append(vv)
+	h.ck(distinct.size() >= 2,
+			"原型质量未被抹平（本局有 %d 档：%s g）" % [distinct.size(), str(distinct)])
+	var masses0: Array = masses.duplicate()
+
 	h.suite("电脑初始转速在区间内浮动（玩家仍是满速）")
 	var lo: float = TopsMain.AI_SPIN_LO
 	var hi: float = TopsMain.AI_SPIN_HI
@@ -143,6 +169,14 @@ func _initialize() -> void:
 	for i in after.size():
 		if not is_instance_valid(main._roster[i]):
 			h.ck(absf(float(after[i])) < 0.001, "已释放对象的行落回 0 rpm（第 %d 行）" % (i + 1))
+
+	# 质量是静态字段：打完一整局也不能变（整局只快照一次）
+	var masses_end: Array = ui.roster_masses()
+	var mass_stable := true
+	for i in masses_end.size():
+		if absf(float(masses_end[i]) - float(masses0[i])) > 0.001:
+			mass_stable = false
+	h.ck(mass_stable, "质量整局不变（出局只影响转速，不影响重量）")
 
 	print("")
 	print("═══════════════════════════════════════════")
