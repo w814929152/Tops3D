@@ -4,6 +4,7 @@ extends SceneTree
 ## 显著偏高 = 有系统性偏差，不是运气好。
 ##
 ## 跑法：--headless --path D:/Tops3D --script res://tests/tops_winrate_check.gd
+##      局数可用 `-- --rounds=60` 覆盖（默认 20 局；调平衡时建议 60 局，否则 5% 档全是噪声）
 ##
 ## 同时分身份统计撞墙 / 接触 / 存活时长，用来定位偏差从哪来：
 ##   · 玩家进场后 thrusting 恒 false，只有漂移（drive_accel = accel×0.16）
@@ -11,12 +12,23 @@ extends SceneTree
 ## 而碰撞里 N_press = m_red·a_n 正比于 drive_accel 差 → 推进越猛，对磨掉转速越狠。
 ##
 
-const ROUNDS := 20
+const DEFAULT_ROUNDS := 20
 const TICKS := 960      # 960 tick/s × 16 倍速 = 每秒实时推进 16 s 游戏时间，且每步仍是 1/60 s
 const SPEEDUP := 16.0
 
+var ROUNDS := DEFAULT_ROUNDS
+
+
+## `-- --rounds=N` 覆盖局数（用户参数在 `--` 之后，OS.get_cmdline_user_args() 才拿得到）
+func rounds_from_args() -> int:
+	for a in OS.get_cmdline_user_args():
+		if a.begins_with("--rounds="):
+			return maxi(1, int(a.substr("--rounds=".length())))
+	return DEFAULT_ROUNDS
+
 
 func _initialize() -> void:
+	ROUNDS = rounds_from_args()
 	Engine.physics_ticks_per_second = 60
 	var scene := load("res://tops/tops_main.tscn")
 	var mm: TopsMain = scene.instantiate()

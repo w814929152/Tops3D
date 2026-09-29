@@ -82,7 +82,8 @@ static var WALL_LOSS_SCALE := 0.25
 static var NATURAL_LOSS_SCALE := 1.00
 ## 轮缘摩擦「搓开」效应的强度。这是运动学不是损耗，默认给足 1.0；
 ## 调小它会让陀螺更容易互相顶住不分开。
-static var CONTACT_PUSH_SCALE := 1.00
+## 2026-09-29 调到 1.20：对撞后沿切向刮开得更狠，画面上更像「被弹飞」。
+static var CONTACT_PUSH_SCALE := 1.20
 
 ## ── 陀螺互相弹开的**法向分离速度下限**（wu/s）──
 ##
@@ -95,9 +96,10 @@ static var CONTACT_PUSH_SCALE := 1.00
 ## 所以这里给一道法向分离速度的**下限**，跟撞墙的 WALL_SEPARATE_SPEED 同一套路：
 ##   · 正在分开且够快 → 完全不干预（正常对撞实测分离速度 144 wu/s，远高于此值）
 ##   · 顶住不动 / 还在靠近 → 补到这个下限
-## 即它只救「死顶」，不碰正常对撞的手感。70 wu/s 在阻尼 0.8 下能推开约 40 wu
-## （一个陀螺直径多一点），画面上是明确的「弹开」而不是弹飞。
-static var CONTACT_SEPARATE_SPEED := 70.0
+## 即它只救「死顶」，不碰正常对撞的手感。
+## 2026-09-29：70 → 115。当前 linear_damp 已是 0.22（不是注释里早期的 0.8），
+## 70 wu/s 分离速度在场地缩到 150 之后显得「软」——调高后死顶段能被明显撞飞。
+static var CONTACT_SEPARATE_SPEED := 115.0
 
 ## 撞完一次之后，AI 至少松开这么久（秒）才重新扑上去。
 ## 弹开的位移要靠这段时间才走得完：分离速度 70 wu/s 在阻尼 0.8 下要 ~0.5 s
@@ -118,7 +120,7 @@ const DEFAULTS := {
 	"wall_cd": 1.00, "contact_cd": 0.50, "edge_ratio": 0.75, "kill_heal": 20.0,
 	"contact_scale": 0.10, "wall_scale": 0.25, "nat_scale": 1.00,
 	"boost_mult": 2.0, "edge_mult": 2.0, "slope_scale": 0.80,
-	"contact_sep": 70.0, "push_scale": 1.00,
+	"contact_sep": 115.0, "push_scale": 1.20, "wall_sep": 165.0,
 }
 
 
@@ -148,6 +150,8 @@ static func apply_tuning(d: Dictionary) -> void:
 		CONTACT_SEPARATE_SPEED = float(d["contact_sep"])
 	if d.has("push_scale"):
 		CONTACT_PUSH_SCALE = float(d["push_scale"])
+	if d.has("wall_sep"):
+		WALL_SEPARATE_SPEED = float(d["wall_sep"])
 
 
 static func reset_tuning() -> void:
@@ -293,7 +297,9 @@ static func resolve_ongoing_contacts(tops: Array[TopTop]) -> void:
 ## 反弹后只剩 ~70，转瞬就被阻尼抹平 —— 看上去就是「飘过去、轻轻蹭一下、贴在边上」。
 ## 所以这里不再指望引擎那点残余动能：每次**真**撞上墙，直接把向内速度补到
 ## WALL_SEPARATE_SPEED。幅度是玩法标定，不是物理推导（同 CONTACT_LOSS_SCALE）。
-static var WALL_SEPARATE_SPEED := 110.0
+## 2026-09-29：110 → 165。场地缩到 150 之后撞墙变频繁（人均 1~10 次），
+## 撞墙应该有「撞飞弹回来」的冲击感，而不是软软地蹭一下。
+static var WALL_SEPARATE_SPEED := 165.0
 
 ## 撞墙：轮缘擦到碗壁，按真实摩擦冲量算（边缘是险地 · Pillar 2）。带冷却，避免贴墙被瞬间刷死。
 ## 同样用 vel_prev 取接近速度 —— 信号送达时已经被弹开了。

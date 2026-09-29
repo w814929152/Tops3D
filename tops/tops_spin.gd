@@ -78,6 +78,43 @@ static func tip_effective_radius(r_m: float) -> float:
 	return r_m * TIP_CONTACT_RATIO * (2.0 / 3.0)
 
 
+## ── 发射：等能量假定（2026-09-29 起，起手转速由它推出来，不再是手写常量）──
+##
+## 发射器（拉条 / 齿条）对陀螺做的功 E 是**发射器自己的事**，与装上去的是哪颗陀螺无关：
+##   E = ½ · I · ω₀²    →    ω₀ = √(2E/I) ∝ 1/√(k·m·r)
+## 于是重的、个头大、外圈配重的陀螺**起手转速更低** —— 转动惯量大，同样的功转不快。
+## 这是真陀螺的常识：重型陀螺拉出去沉稳但转速低，轻的尖啸着飞转。
+##
+## 基准：以 BALANCED（50 g / 16 mm / k=0.55 → I=7.04×10⁻⁶）起手 102 点反算，E ≈ 1.318 J。
+## ⚠ 它决定的是**起手**，不是寿命：寿命仍由衰减项（下一节）决定，两者是独立的两头。
+static var LAUNCH_ENERGY_J := 1.318
+
+## ── 发射器的传动不是理想功源：齿条与陀螺是**摩擦传动**，有滑移损失 ──
+## 陀螺越重、咬合正压力越大 → 滑移越少 → 真正传到陀螺上的功越多：
+##   E_eff = E · (I / I_ref)^β     β ∈ [0, 1]
+##   β = 0  纯等能量（理想功源）  → ω₀ ∝ I^(-1/2)
+##   β = 1  完全补偿（等角速度）  → ω₀ 与惯量无关
+## ω₀ = √(2·E_eff/I) = √(2E/I_ref) · (I/I_ref)^((β−1)/2)，取 I = I_ref 时恒等于 √(2E/I_ref)。
+##
+## ⚠ β=0（纯等能量）在本项目**不可玩**：三原型的惯量差达 5.7×（质量 2.3× 再叠半径² 2.1×，
+##   比真实战斗陀螺夸张得多），等能量把起手转速拉成 157 / 102 / 66，寿命被拉成 149/92/55 s，
+##   实测两个 DART 合计胜率 90%、RAM 0%。β 是从「理想功源」往「等角速度」退的档位：
+##     β=0    → 132 以上（DART 157）→ DART 通吃
+##     β=0.40 → 132 / 102 / 79      → 电脑之间 DART 50% / BAL 27% / RAM 23%（理论 50/25/25）
+##     β=0.60 → 121 / 102 / 86      → DART 掉到 36%（太弱）、RAM 32%
+## 0.40 是实测配比最正的档位（60 局，见 tests/tops_winrate_check.gd）。
+## β 只在 0~1 之间有物理意义：>1 = 重陀螺起手反而更快，那是发射器「作弊」，没有机制支撑。
+static var LAUNCH_SLIP_EXP := 0.40
+
+
+## 起手角速度（rad/s）。ref_inertia 是基准原型的转动惯量（保证 β 变化时基准档位不动）
+static func launch_omega(inertia: float, ref_inertia: float) -> float:
+	if inertia <= 1e-12 or ref_inertia <= 1e-12:
+		return 0.0
+	var w_ref: float = sqrt(2.0 * LAUNCH_ENERGY_J / ref_inertia)
+	return w_ref * pow(inertia / ref_inertia, (LAUNCH_SLIP_EXP - 1.0) * 0.5)
+
+
 ## 转速（游戏点数）→ 角速度（rad/s）
 static func omega_of(spin: float) -> float:
 	return spin * OMEGA_PER_SPIN

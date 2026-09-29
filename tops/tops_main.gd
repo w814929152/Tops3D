@@ -52,6 +52,13 @@ static var SHRINK_MIN_RATIO := 0.50
 
 # 发射参数
 const SPAWN_RADIUS_RATIO := 0.88   # 待命位置：场地边缘内侧
+
+## 电脑陀螺的初始转速浮动区间（× 原型 spin_max）。
+## 玩家仍是满转速（自己蓄力发射，不该被随机惩罚）；电脑在 ±12% 内浮动，
+## 让每局的对手强弱有变化，而不是五颗一模一样的复制品。
+## ⚠ 区间要以 1.0 为**中心**（0.88~1.12），否则会变成对某一方的系统性削弱/加强。
+const AI_SPIN_LO := 0.88
+const AI_SPIN_HI := 1.12
 const POWER_MIN := 0.15
 const POWER_MAX := 1.00
 const POWER_RATE := 1.15           # 蓄力条每秒充能速度（往返）
@@ -224,6 +231,11 @@ func _reset() -> void:
 		#   抹平之后制衡没了，RAM 变成严格更优：实测胜率 **90%**，DART 两个都是 0%。
 		#   恢复原型自带的 spin_max（DART 115 / BALANCED 100 / RAM 82）后三者重新互为代价。
 		# 不再手写衰减倍率：转速寿命由质量 / 半径 / 形状系数 / 轴尖摩擦推出来（TopsSpin）
+		# 电脑：初始转速在 AI_SPIN_LO~HI 间浮动（玩家保持满速，不受随机影响）。
+		# spin_cap 同步跟上 —— 击杀回血按它封顶，否则高转速的那颗一击杀就被打回标称值。
+		if strats[i] != "player":
+			t.spin = t.spin_max * randf_range(AI_SPIN_LO, AI_SPIN_HI)
+			t.spin_cap = t.spin
 		var ang: float = _spawn_angle(i, lineup.size())
 		var p := CENTER + Vector2.from_angle(ang) * BASE_RADIUS * SPAWN_RADIUS_RATIO
 		t.facing = ang + PI
@@ -247,7 +259,9 @@ func _reset() -> void:
 			"color": TopsArt.top_color(t.top_id),
 			"is_player": strats[i] == "player",
 			"spin": t.spin,
-			"spin_max": t.spin_max,
+			# 分母用 spin_cap（本局实际初始转速）而不是标称 spin_max：
+			# 电脑可能随机到高于标称值，用标称当分母会显示成「114/102」这种怪值。
+			"spin_max": t.spin_cap,
 			"omega": t.omega(),
 			"alive": true,
 		})
@@ -257,7 +271,7 @@ func _reset() -> void:
 	if _ui != null:
 		_ui.show_title()
 		_ui.set_stats(_alive_count(), _tops.size(), 0.0, false)
-		_ui.set_spin(_player.spin, _player.spin_max)
+		_ui.set_spin(_player.spin, _player.spin_cap)
 		_ui.set_power(_power, false, false)
 		_ui.set_hint("")
 		_update_roster()
@@ -495,7 +509,7 @@ func _on_top_died(top: TopTop) -> void:
 	for t in _tops:
 		if t.top_id == killer_id and t.alive:
 			t.kills += 1
-			t.spin = minf(t.spin + TopsRules.KILL_HEAL, t.spin_max)
+			t.spin = minf(t.spin + TopsRules.KILL_HEAL, t.spin_cap)
 	if _ui == null:
 		return
 	if top == _player:
@@ -610,7 +624,7 @@ func _update_roster() -> void:
 		var row: Dictionary = _roster_data[i]
 		if is_instance_valid(t):
 			row["spin"] = t.spin
-			row["spin_max"] = t.spin_max
+			row["spin_max"] = t.spin_cap
 			row["omega"] = t.omega()
 			row["alive"] = t.alive
 		else:
@@ -627,7 +641,7 @@ func _update_hud() -> void:
 	_update_roster()
 	_ui.set_roster(_roster_data)
 	if _player_ok():
-		_ui.set_spin(_player.spin, _player.spin_max)
+		_ui.set_spin(_player.spin, _player.spin_cap)
 		_ui.set_power(_power, _charging, _power >= POWER_PERFECT)
 	match _phase:
 		Phase.TITLE:

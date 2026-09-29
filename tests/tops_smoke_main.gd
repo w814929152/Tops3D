@@ -295,7 +295,7 @@ func _rules_friction(h: TestHarness) -> void:
 	var p := _pair(h, 95, 96, Vector2(60.0, 300.0))
 	var a: TopTop = p[0]
 	var b: TopTop = p[1]
-	a.spin_max = 100.0            # 原型自带 spin_max（RAM 82 / DART 115），这里统一成 100
+	a.spin_max = 100.0            # 原型自带 spin_max 由发射能量推导（各原型不同），这里统一成 100
 	b.spin_max = 100.0
 	a.spin = 100.0
 	b.spin = 100.0

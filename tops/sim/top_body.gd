@@ -18,22 +18,59 @@ extends RefCounted
 ##   · tip_mu  轴尖与盘面的滑动摩擦系数：尖而细的轴尖小（转得久），宽而钝的轴尖大
 ## 转速寿命差异**完全由 m / r / shape_k / tip_mu 推出来**，不再手写 decay 倍率。
 ##
-## ── spin_max 是三者的**平衡砝码**，别乱改 ──
-## 碰撞损耗 Δω = J_t/(k·m·r)：RAM 又重又大，挨一下只掉 DART 的 1/4，
-## 所以必须用**更少的初始转速**来换；DART 最脆，用**最多的转速**补。
-## 两者互相制衡，任一头给多了都会翻盘（2026-09-28 实测，10 局）：
-##   · 全部归一成 100  → 制衡消失，RAM 严格更优 → **RAM 90%**、DART 0%
-##   · 原型原值 115/100/82 → 自然衰减那头压过碰撞 → **DART 40%**、RAM 0%
-## 定档 105 / 102 / 88（2026-09-28，20 局实测胜率：DART 10~20% / BAL 20~35% / RAM 15%）。
-## 调这个数字时注意**两股力量相反**，只盯着一头会来回翻盘：
-##   给多了（如全部归一成 100）→ 碰撞抗性主导 → RAM 90%
-##   给少了（如原型原值 115/100/82）→ 自然衰减主导 → DART 40%、RAM 0%
-## 自然寿命指数 = spin_max ÷ (μ /(k·r))，本档为 DART 6827 / BAL 5982 / RAM 5105。
+## ── tip_mu 是**平衡砝码**（2026-09-29，配合能量推导的起手转速）──
+## 起手转速由 √(2E/I) 推出来之后，寿命（自然衰减）只能靠 tip_mu 调，它是唯一的寿命旋钮。
+## 但 tip_mu 不是随便拍的：**寿命必须递减**（DART 最长、RAM 最短）才能抵消 RAM 的抗撞优势
+## （RAM 挨一下只掉 DART 的 1/4）。实测过三种配法：
+##   · 全拉平到 90 s  → 「碰撞抗性」独占，RAM 45%、DART 15%
+##   · 全部统一 0.15  → 寿命反而递增（86/92/92），RAM 65%、DART 0%
+##   · **递减** 104/92/77 s（当前 0.132 / 0.150 / 0.164）→ 复现实测均衡那一版的寿命格局
+##     （β=0.40 档位下电脑之间 DART 50% / BAL 27% / RAM 23%，理论 50/25/25）
+## 数值由 `tests/tops_mass_probe.gd` 第 ⑩ 节二分反解得到（靶 = 旧手写档位的寿命格局）。
+## 这也符合真实产品分工：轻快的攻击型用精密尖轴（转得久但一撞就掉），
+## 重型用宽面轴尖（磨得凶，靠抗撞而不是靠耐久吃饭）。
+##
+## ── 起手转速（2026-09-29 起）：由发射能量推出来，不再是手写档位 ──
+## 发射器做的功 E 与装哪颗陀螺无关 → E = ½·I·ω₀² → ω₀ = √(2E/I) ∝ 1/√(k·m·r)。
+## 于是**重而大的陀螺起手更慢**（惯量大，同样的功转不快），与碰撞抗性天然形成制衡：
+##   RAM 重且大 → 起手慢（吃亏） ＋ 挨打掉得少（占便宜）
+## 在此之前 spin_max 是手写档位 105/102/88（2026-09-28），实测胜率
+##   DART 10~20% / BAL 20~35% / RAM 15%，但那三个数是拍出来的，没有物理来源。
+## 纯等能量（β=0）会拉成 157 / 102 / 66，差距过大 → DART 通吃；
+## 计入发射器传动滑移（β=0.40）后是 **132 / 102 / 79**，与手写档位同向、幅度更大。
+## ⚠ 改 LAUNCH_ENERGY_J / LAUNCH_SLIP_EXP / shape_k 都会让这一行整体变动，
+##   改完必须用 tests/tops_mass_probe.gd 第 ⑩ 节重解 tip_mu，再跑 60 局胜率复核。
+## ⚠ 别用 spin_bias 把三者拉平：拉平 = 只留下「碰撞抗性」一头 → RAM 严格更优 → 90%。
+## ⚠ 表里**没有** spin_max：起手转速由发射能量 E 与转动惯量 I 推出来（见 derived_spin_max）。
+## spin_bias 是唯一的平衡微调旋钮（默认 1.0 = 纯等能量）。
 const ARCHETYPES: Dictionary = {
-	&"DART": {"mass": 0.7, "radius": 13.0, "max_speed": 250.0, "accel": 1000.0, "turn_rate": 5.2, "spin_max": 105.0, "decay_mult": 1.00, "shape_k": 0.50, "tip_mu": 0.10},
-	&"BALANCED": {"mass": 1.0, "radius": 16.0, "max_speed": 285.0, "accel": 700.0, "turn_rate": 4.2, "spin_max": 102.0, "decay_mult": 1.00, "shape_k": 0.55, "tip_mu": 0.15},
-	&"RAM": {"mass": 1.6, "radius": 19.0, "max_speed": 320.0, "accel": 430.0, "turn_rate": 3.0, "spin_max": 88.0, "decay_mult": 1.00, "shape_k": 0.58, "tip_mu": 0.19},
+	&"DART": {"mass": 0.7, "radius": 13.0, "max_speed": 250.0, "accel": 1000.0, "turn_rate": 5.2, "decay_mult": 1.00, "shape_k": 0.50, "tip_mu": 0.132, "spin_bias": 1.00},
+	&"BALANCED": {"mass": 1.0, "radius": 16.0, "max_speed": 285.0, "accel": 700.0, "turn_rate": 4.2, "decay_mult": 1.00, "shape_k": 0.55, "tip_mu": 0.150, "spin_bias": 1.00},
+	&"RAM": {"mass": 1.6, "radius": 19.0, "max_speed": 320.0, "accel": 430.0, "turn_rate": 3.0, "decay_mult": 1.00, "shape_k": 0.58, "tip_mu": 0.164, "spin_bias": 1.00},
 }
+
+
+## 起手转速 = 等发射能量下的起手角速度：E = ½·I·ω₀² → ω₀ = √(2E/I) ∝ 1/√(k·m·r)。
+## 重而大的陀螺转动惯量大，同样的功转不快 → **起手转速更低**（真物理如此）。
+##
+## ⚠ 与「碰撞抗性」是**相反的两头**：RAM 重且大 → 起手慢（吃亏），但挨打掉得少（占便宜）。
+##   两头互相制衡，所以不要再用 spin_bias 把三者拉平 —— 拉平就等于把碰撞那一头
+##   单独放大，会退回「RAM 严格更优、胜率 90%」的老问题（2026-09-28 实测）。
+## 基准原型的转动惯量：β 的参照点，也是发射能量 E 的反算基准（BALANCED 起手 102 点）
+static func reference_inertia() -> float:
+	var t: Dictionary = ARCHETYPES[&"BALANCED"]
+	return TopsSpin.axial_inertia(float(t["mass"]) * TopsSpin.MASS_UNIT_KG,
+			float(t["radius"]) * TopsSpin.WU_TO_M, float(t.get("shape_k", 0.55)))
+
+
+static func derived_spin_max(arch: StringName) -> float:
+	var t: Dictionary = ARCHETYPES.get(arch, ARCHETYPES[&"BALANCED"])
+	var m_kg: float = float(t["mass"]) * TopsSpin.MASS_UNIT_KG
+	var r_m: float = float(t["radius"]) * TopsSpin.WU_TO_M
+	var shape_k: float = float(t.get("shape_k", 0.55))
+	var inertia: float = TopsSpin.axial_inertia(m_kg, r_m, shape_k)
+	return TopsSpin.spin_of(TopsSpin.launch_omega(inertia, reference_inertia())) \
+			* float(t.get("spin_bias", 1.0))
 
 var id: int = 0
 var archetype: StringName = &"BALANCED"
@@ -78,7 +115,7 @@ static func create(arch: StringName, p_id: int) -> TopBody:
 	b.max_speed = float(t["max_speed"])
 	b.accel = float(t["accel"])
 	b.turn_rate = float(t["turn_rate"])
-	b.spin_max = float(t["spin_max"])
+	b.spin_max = derived_spin_max(arch)
 	b.decay_mult = float(t["decay_mult"])
 	b.spin = b.spin_max
 	return b

@@ -62,6 +62,28 @@ func _initialize() -> void:
 			maxes.append(sm)
 	h.ck(maxes.size() >= 2, "原型转速上限未被抹平（本局有 %d 档：%s）" % [maxes.size(), str(maxes)])
 
+	h.suite("电脑初始转速在区间内浮动（玩家仍是满速）")
+	var lo: float = TopsMain.AI_SPIN_LO
+	var hi: float = TopsMain.AI_SPIN_HI
+	var in_range := 0
+	var off_nominal := 0
+	for i in main._roster.size():
+		var t: TopTop = main._roster[i]
+		var ratio: float = t.spin / t.spin_max
+		if i == 0:   # 阵容第 0 位恒为玩家
+			h.ck(absf(ratio - 1.0) < 1e-6, "玩家是满转速，不被随机浮动影响")
+			continue
+		if ratio >= lo - 1e-6 and ratio <= hi + 1e-6:
+			in_range += 1
+		if absf(ratio - 1.0) > 0.01:
+			off_nominal += 1
+		# spin_cap 必须等于初始转速：击杀回血按它封顶，否则高转速的那一颗
+		# 一击杀就会被 minf 打回标称值，随机浮动等于白给。
+		h.ck(absf(t.spin_cap - t.spin) < 1e-6,
+				"对手 %d 的 spin_cap 跟着随机转速走（%.1f）" % [i + 1, t.spin_cap])
+	h.eq(in_range, 4, "4 个电脑的初始转速都落在 [%.2f, %.2f] × spin_max 内" % [lo, hi])
+	h.ck(off_nominal >= 2, "转速确实在浮动（%d/4 个偏离标称值）" % off_nominal)
+
 	h.suite("战斗：转速实时下降，出局只置 0 不移除")
 	Input.action_press("tops_boost")
 	for _i in 30:

@@ -61,7 +61,12 @@ var drive_accel: Vector2 = Vector2.ZERO
 
 # ── 逻辑属性 ──
 var spin: float = 100.0
+## 原型的标称转速上限（平衡砝码，见 TopBody.ARCHETYPES）——UI 进度条的分母
 var spin_max: float = 100.0
+## 本局**实际**的转速上限 = 初始转速（可能带随机浮动，见 TopsMain.AI_SPIN_RANGE）。
+## 击杀回血要按它封顶：否则随机到高于 spin_max 的陀螺一击杀就被 minf 打回标称值，
+## 随机浮动等于白给。
+var spin_cap: float = 100.0
 ## 轴尖品质倍率（1.0 = 标准轴尖；性格差异已由 m/r/shape_k/tip_mu 表达）
 var decay_mult: float = 1.0
 var boosting: bool = false
@@ -143,9 +148,11 @@ static func create(arch: StringName, p_id: int) -> TopTop:
 	t.move_speed = float(p["max_speed"])
 	t.accel = float(p["accel"])
 	t.turn_rate = float(p["turn_rate"])
-	t.spin_max = float(p["spin_max"])
+	# 起手转速由发射能量 × 转动惯量推出来（等能量假定），不是手写常量
+	t.spin_max = TopBody.derived_spin_max(arch)
 	t.decay_mult = float(p["decay_mult"])
 	t.spin = t.spin_max
+	t.spin_cap = t.spin_max
 	t.drift_phase = randf() * TAU
 	t.drift_rate = 0.42 + randf() * 0.36
 
@@ -174,8 +181,11 @@ static func create(arch: StringName, p_id: int) -> TopTop:
 	t.continuous_cd = true                      # 防高速穿透（Godot 4：布尔属性）
 	t.contact_monitor = true
 	t.max_contacts_reported = 8
+	# 恢复系数 = 对撞弹性的**主来源**（规则层只兜「死顶」，不制造正常对撞的弹开）。
+	# 2026-09-29：0.70 → 0.85，配合墙的 0.90，让对撞与撞墙都有明确的冲击反弹。
+	# ⚠ 别碰 friction：0.15 是轮缘互磨的手感，调高会让两颗陀螺黏住互相刮。
 	var pm := PhysicsMaterial.new()
-	pm.bounce = 0.70
+	pm.bounce = 0.85
 	pm.friction = 0.15
 	t.physics_material_override = pm
 

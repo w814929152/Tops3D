@@ -74,7 +74,8 @@ func _phys(arch: StringName) -> Dictionary:
 	return {
 		"m": m, "r": r, "k": k,
 		"I": TopsSpin.axial_inertia(m, r, k),
-		"spin_max": float(p["spin_max"]),
+		# ⚠ ARCHETYPES 里已经没有 spin_max 了（2026-09-29 起由发射能量推导）
+		"spin_max": TopBody.derived_spin_max(arch),
 	}
 
 
