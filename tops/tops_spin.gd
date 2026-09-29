@@ -42,7 +42,12 @@ const C_M_AIR := 0.05         # 转盘气动阻力矩系数（光滑盘 Re≈10�
 const C_VISC := 0.0015        # 轴承黏性 + 微晃动的等效线性阻尼（1/s）
 const TIP_CONTACT_RATIO := 0.035  # 轴尖接触半径 / 陀螺半径（16 mm 的陀螺 → 0.56 mm）
 const WOBBLE_GAIN := 1.50     # 低转速失稳 → 轴尖刮擦加重的倍率上限
-const RESTITUTION := 0.70     # 恢复系数（与 PhysicsMaterial.bounce 一致）
+## ⚠ 与 PhysicsMaterial.bounce **故意不同**：引擎侧 bounce=0.85 管的是**画面上的弹开**，
+## 这里 0.70 管的是**法向冲量 J_n 有多大**（J_n 只通过 J_t=μ·J_n 决定磨掉多少转速）。
+## 两者可以不等：真实碰撞里「弹得远」和「接触面磨得狠」本来就是两回事，后者还取决于
+## 接触区塑性变形。要对齐成 0.85 也不是不行，但 J_n 会 +21%，接触伤害同步涨 21%，
+## **必须重新跑胜率体检**再定 —— 别顺手改。
+const RESTITUTION := 0.70
 const MU_CONTACT := 0.35      # 金属攻击环之间的滑动摩擦系数
 const MU_WALL := 0.18         # 陀螺轮缘 vs 碗壁的滑动摩擦系数
 
@@ -178,7 +183,11 @@ static func natural_domega(m_kg: float, r_m: float, I: float, tip_mu: float,
 ##                库仑上限 vs 「完全止滑所需冲量」，K⁻¹ = 1/m_red + r_a²/I_a + r_b²/I_b
 ##   ④ 角冲量     ΔL = J_t·r  →  Δω = ΔL / I
 ##
-## 参数里 rel_vel / drive_a / drive_b 用**游戏单位**（wu/s、wu/s²），内部折算成 SI。
+## 参数约定（⚠ 传错了结果会静默地错，不会报错）：
+##   n        必须是**单位向量**，方向 A → B
+##   rel_vel  = v_b − v_a（**b 相对 a**），游戏单位 wu/s
+##   drive_*  驱动加速度（wu/s²），只有「把两者压在一起」的分量起作用
+## 返回：Δω 用 rad/s，dv 用 **wu/s**（已除回 k_conv）—— 一个字典里两种单位，别混。
 ##
 ## ⚠ 切向摩擦冲量 J_t 会**同时**作用在自转和平移上，两半都不能丢：
 ##   · 自转：Δω = J_t·r / I            （磨掉转速）
@@ -191,9 +200,15 @@ static func contact_resolve(ma: float, ra: float, Ia: float, wa: float,
 		mb: float, rb: float, Ib: float, wb: float,
 		n: Vector2, rel_vel: Vector2, drive_a: Vector2, drive_b: Vector2,
 		press_dt: float) -> Dictionary:
+	# ⚠ 后三项是**诊断用**（j_n / j_t / 各项上限），规则层只读 domega_* 与 dv_*，
+	#   留着是为了让 tests/tops_damage_probe.gd 能说清「这一下到底被哪个上限卡住」：
+	#   · coulomb = μ·J_n  法向冲量给的摩擦上限（撞击越猛越松）
+	#   · slip    = |u_s|/inv_k  让接触点**完全止滑**所需的冲量（转速越高越松）
+	#   J_t 取两者的小的 —— 谁小谁说了算，另一个再大也没用。
 	var out := {
 		"domega_a": 0.0, "domega_b": 0.0,
 		"dv_a": Vector2.ZERO, "dv_b": Vector2.ZERO,
+		"j_n": 0.0, "j_t": 0.0, "u_s": 0.0, "coulomb": 0.0, "slip": 0.0,
 	}
 	var m_red: float = (ma * mb) / maxf(ma + mb, 1e-9)
 	var k_conv: float = WU_TO_M * VEL_GAIN
@@ -208,27 +223,49 @@ static func contact_resolve(ma: float, ra: float, Ia: float, wa: float,
 		J_n += N_press * press_dt
 	if J_n <= 1e-12:
 		return out
+	out["j_n"] = J_n
 
 	# ② 接触点两面相对滑动（沿切向 t̂ = n 顺时针转 90°）
+	#   取 **A 面相对 B 面**：
+	#     A 的接触点速度 = v_a·t̂ − ω_a·r_a     （ω>0 时该点沿 −t̂ 走）
+	#     B 的接触点速度 = v_b·t̂ + ω_b·r_b     （接触点在 B 的 −r_b·n̂ 侧，沿 +t̂ 走）
+	#   相减 → u_s = (v_a−v_b)·t̂ − (ω_a·r_a + ω_b·r_b) = −rel_vel·t̂ − (…)
+	# ⚠ 原来写成 +rel_vel·t̂（rel_vel 是「b 相对 a」），平动项与自转项**用了两套相对性**，
+	#   导致纯切向擦过时摩擦方向反号。自转项（量级大 5 倍）一直是对的，所以这个 bug
+	#   只在切向平动占主导时才显形 —— 靠肉眼看不出来，得靠守恒律审计才抓得到。
 	var t_hat := Vector2(n.y, -n.x)
-	var u_s: float = rel_vel.dot(t_hat) * k_conv - (wa * ra + wb * rb)
+	var u_s: float = -rel_vel.dot(t_hat) * k_conv - (wa * ra + wb * rb)
+	out["u_s"] = u_s
 
 	# ③ 切向摩擦冲量（库仑上限 / 止滑所需，取小）
 	var inv_k: float = 1.0 / maxf(m_red, 1e-9) \
 			+ ra * ra / maxf(Ia, 1e-12) + rb * rb / maxf(Ib, 1e-12)
-	var J_t: float = minf(MU_CONTACT * J_n, absf(u_s) / maxf(inv_k, 1e-9))
+	var coulomb: float = MU_CONTACT * J_n
+	var slip: float = absf(u_s) / maxf(inv_k, 1e-9)
+	var J_t: float = minf(coulomb, slip)
+	out["coulomb"] = coulomb
+	out["slip"] = slip
 	if J_t <= 1e-12 or absf(u_s) <= 1e-9:
 		return out
+	out["j_t"] = J_t
 
-	# ④ 摩擦总是阻碍相对滑动：A 受 +s·J_t·t̂ 于 +r_a·n̂，B 受 −s·J_t·t̂ 于 −r_b·n̂，
-	#    两者对**各自**自转轴的力矩同号 → 同向自转时双减速，反向时趋近齿轮啮合。
+	# ④ 摩擦总是阻碍相对滑动：接触点处 A 面以 u_s 相对 B 面滑，摩擦力就反着来
+	#     f_a = −s·J_t（沿 t̂ 的有符号分量），B 受 −f_a。
+	#    力矩 τ = r_vec × F：A 的接触点在 +r_a·n̂，B 在 −r_b·n̂，而 (n̂×t̂)_z = −1，
+	#    ⇒ Δω_a = −r_a·f_a/I_a = **+s·J_t·r_a/I_a**，Δω_b = −r_b·f_a/I_b = **+s·J_t·r_b/I_b**。
+	#    两者**同号** → 同向自转时双减速，反向时趋近齿轮啮合。
 	var s: float = signf(u_s)
 	out["domega_a"] = s * J_t * ra / maxf(Ia, 1e-12)
 	out["domega_b"] = s * J_t * rb / maxf(Ib, 1e-12)
-	# ⑤ 同一道摩擦冲量的平移反作用：A 往 +s·t̂、B 往 −s·t̂ —— 沿切向互相搓开。
-	#    除以 k_conv 把 m/s 换回游戏单位 wu/s。
-	out["dv_a"] = t_hat * (s * J_t / maxf(ma, 1e-9) / k_conv)
-	out["dv_b"] = t_hat * (-s * J_t / maxf(mb, 1e-9) / k_conv)
+	# ⑤ 同一道摩擦冲量的平移反作用：A 受 −s·J_t·t̂、B 受 +s·J_t·t̂ —— 沿切向互相搓开。
+	#    ⚠ 这两行的符号必须以「f_a = −s·J_t」为准，跟 ④ 用同一个 f_a：
+	#      原来写成 A 受 +s·J_t·t̂，与 ④ 自相矛盾 —— 自转角动量少了，轨道角动量
+	#      却往同一边多，总角动量凭空少 28%（见 tests/tops_conservation_check.gd）。
+	#      表现是互磨时两颗被往**错误**的方向拖着绕圈，但因为两颗仍然一正一反地
+	#      分开，「搓开」的效果看着还在，所以极难靠肉眼发现。
+	# 除以 k_conv 把 m/s 换回游戏单位 wu/s。
+	out["dv_a"] = t_hat * (-s * J_t / maxf(ma, 1e-9) / k_conv)
+	out["dv_b"] = t_hat * (s * J_t / maxf(mb, 1e-9) / k_conv)
 	return out
 
 
@@ -297,6 +334,31 @@ const WOBBLE_NUT_CAP := 9.0        # 章动频率上限（同上，真值 ≈ ω
 const WOBBLE_NUT_RATIO := 0.35     # 章动幅度 / 摆角
 
 
+## ── 低转速三档判定（2026-09-29 起，玩法层 / UI 都读它）──
+## ω_c 是物理分界：ω 掉到它以下，「直立自转」这个解**不再稳定**，陀螺必然倒 ——
+## 只是倒下还要花几秒。所以「还没归零」不等于「还有救」，这一档要单独认出来。
+## onset = ω_c × WOBBLE_ONSET_GAIN 是**视觉**提前量（画面上提前一点开始晃），
+## 判定的中间档就用它当界，让「看得到晃」和「判定为摆头」对得上。
+enum WobblePhase {
+	STEADY,     # ω ≥ onset：直立稳定，真陀螺「睡着」的状态
+	WOBBLING,   # ω_c ≤ ω < onset：开始摆头，转速还能拉回来
+	TOPPLING,   # ω < ω_c：直立解已不稳定，物理上必倒，只是还没归零
+}
+
+## 档位名（UI / 日志用）
+const WOBBLE_PHASE_NAMES: Array[String] = ["稳定", "摆头", "倾倒"]
+
+
+## 由当前角速度与临界角速度定档
+static func wobble_phase_of(omega: float, omega_c: float) -> WobblePhase:
+	var w: float = absf(omega)
+	if w >= omega_c * WOBBLE_ONSET_GAIN:
+		return WobblePhase.STEADY
+	if w >= omega_c:
+		return WobblePhase.WOBBLING
+	return WobblePhase.TOPPLING
+
+
 ## 质心离轴尖的高度（m）
 static func com_height(r_m: float) -> float:
 	return r_m * COM_H_RATIO
@@ -357,4 +419,5 @@ static func wobble_state(m_kg: float, r_m: float, I_axial: float, shape_k: float
 		"nut_rate": minf(nutation_rate(I_axial, I_t, omega), WOBBLE_NUT_CAP),
 		"omega_c": wc,
 		"onset": onset,
+		"phase": wobble_phase_of(omega, wc),
 	}
