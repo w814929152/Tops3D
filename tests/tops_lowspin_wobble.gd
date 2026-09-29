@@ -50,6 +50,12 @@ func _initialize() -> void:
 	_h.suite("⑥ 时间轴模拟：满速自然衰减到停")
 	_timeline(_h)
 
+	_h.suite("⑦ 低转速三档判定：稳定 / 摆头 / 倾倒")
+	_phases(_h)
+
+	_h.suite("⑧ 濒死惩罚：摆头 / 倾倒的陀螺挨打掉得更多（可被补刀）")
+	_topple_damage(_h)
+
 	print("")
 	print("── 汇总：PASS %d / FAIL %d" % [_h.pass_count(), _h.fail_count()])
 	for f in _failures():
@@ -59,6 +65,127 @@ func _initialize() -> void:
 
 func _failures() -> Array[String]:
 	return _h.failures()
+
+
+# ══════════════════════════════════════════════════════════
+# ⑧ 濒死惩罚（TopsRules.WOBBLE_DAMAGE_MULT）
+# ══════════════════════════════════════════════════════════
+func _topple_damage(h: TestHarness) -> void:
+	var t := TopTop.create(&"BALANCED", 1)
+	t.spin = t.spin_max
+	h.eq(t.wobble_phase(), TopsSpin.WobblePhase.STEADY, "前置：满转速是「稳定」档")
+	h.ck(absf(TopsRules.damage_mult(t) - 1.00) < 1e-6,
+			"稳定档伤害倍率 %.2f" % TopsRules.damage_mult(t))
+
+	t.spin = TopsSpin.spin_of(t.omega_crit) * 1.20
+	h.eq(t.wobble_phase(), TopsSpin.WobblePhase.WOBBLING, "前置：1.2×ω_c 是「摆头」档")
+	h.ck(absf(TopsRules.damage_mult(t) - 1.20) < 1e-6,
+			"摆头档伤害倍率 %.2f" % TopsRules.damage_mult(t))
+
+	t.spin = TopsSpin.spin_of(t.omega_crit) * 0.50
+	h.eq(t.wobble_phase(), TopsSpin.WobblePhase.TOPPLING, "前置：0.5×ω_c 是「倾倒」档")
+	h.ck(absf(TopsRules.damage_mult(t) - 1.50) < 1e-6,
+			"倾倒档伤害倍率 %.2f" % TopsRules.damage_mult(t))
+	t.free()
+
+	# ── 端到端：同一道冲击，打在稳定 vs 倾倒两种状态上 ──
+	# ⚠ 不能直接把转速压到 ω_c 以下做这个对比：倾倒档只剩 11 点，
+	#   一道 −4 点的冲击会撞上「钳到 0」的下限，量出来的差额是假的。
+	#   改成**把 ω_c 抬高**到 200 点，90 点转速就稳稳落在倾倒档，且不触发钳制。
+	var t2 := TopTop.create(&"BALANCED", 2)
+	var dmg: float = -TopsSpin.omega_of(4.0)     # 一道 −4 点的冲击
+	t2.spin = 90.0
+	var loss_steady: float = t2.spin - _after_hit(t2, dmg)
+	t2.omega_crit = TopsSpin.omega_of(200.0)    # 强制进入倾倒档
+	t2.spin = 90.0
+	h.eq(t2.wobble_phase(), TopsSpin.WobblePhase.TOPPLING, "ω_c 抬高后 90 点确实是「倾倒」")
+	var loss_topple: float = t2.spin - _after_hit(t2, dmg)
+	print("   同一道 −4 点冲击：稳定档掉 %.2f 点，倾倒档掉 %.2f 点（×%.2f）"
+			% [loss_steady, loss_topple, loss_topple / maxf(loss_steady, 1e-6)])
+	h.ck(loss_topple > loss_steady * 1.40,
+			"倾倒档挨同一道冲击掉得更多（%.2f vs %.2f 点）" % [loss_topple, loss_steady])
+	h.ck(loss_topple < loss_steady * 1.60,
+			"倍率没有失控（×%.2f，设计值 1.50）" % [loss_topple / maxf(loss_steady, 1e-6)])
+	t2.free()
+
+
+## 打一道 Δω，返回打完之后还剩多少点
+func _after_hit(t: TopTop, domega: float) -> float:
+	TopsRules.apply_domega(t, domega)
+	return t.spin
+
+
+# ══════════════════════════════════════════════════════════
+# ⑦ 低转速三档判定
+# ══════════════════════════════════════════════════════════
+##
+## ω_c 是物理分界：ω < ω_c 时「直立自转」这个解不再稳定 → **必然倒**，
+## 只是倒下还要几秒。所以「还没归零」≠「还有救」，这一档必须单独认出来，
+## 否则玩法层和 UI 只能看到「血还没空」，看不到「已经在倒了」。
+func _phases(h: TestHarness) -> void:
+	var bal := _phys(&"BALANCED")
+	var wc: float = TopsSpin.critical_omega(bal["m"], bal["r"], bal["I"], bal["k"])
+	var onset: float = wc * TopsSpin.WOBBLE_ONSET_GAIN
+	print("   BALANCED：ω_c = %.1f rad/s（%.1f 点）｜摆头起始 = %.1f 点"
+			% [wc, TopsSpin.spin_of(wc), TopsSpin.spin_of(onset)])
+
+	# 三档边界：转速从 0 往上扫，档位只能**单调变好**（倾倒→摆头→稳定），绝不回跳。
+	# 反过来也就是「转速往下掉时档位单向恶化」—— 中间不会出现「先倒又站直」的抖动。
+	var seen: Array[int] = []
+	var monotonic := true
+	var prev: int = 99
+	for sp in range(0, 220, 4):
+		var ph: int = TopsSpin.wobble_phase_of(TopsSpin.omega_of(float(sp)), wc)
+		if not seen.has(ph):
+			seen.append(ph)
+		if ph > prev:
+			monotonic = false
+		prev = ph
+	h.eq(seen.size(), 3, "转速从 0 扫到 220 点，三档都出现过（%s）" % str(seen))
+	h.ck(monotonic, "档位随转速**单调**变化，不回跳（0=稳定 1=摆头 2=倾倒）")
+
+	# 具体落点
+	var p_full: int = TopsSpin.wobble_phase_of(TopsSpin.omega_of(float(bal["spin_max"])), wc)
+	var p_onset: int = TopsSpin.wobble_phase_of(onset * 1.01, wc)
+	var p_mid: int = TopsSpin.wobble_phase_of((wc + onset) * 0.5, wc)
+	var p_crit: int = TopsSpin.wobble_phase_of(wc * 0.99, wc)
+	var p_zero: int = TopsSpin.wobble_phase_of(0.0, wc)
+	h.eq(p_full, TopsSpin.WobblePhase.STEADY, "满转速判定为「稳定」")
+	h.eq(p_onset, TopsSpin.WobblePhase.STEADY, "刚过摆头起始仍是「稳定」")
+	h.eq(p_mid, TopsSpin.WobblePhase.WOBBLING, "ω_c 与起始之间判定为「摆头」")
+	h.eq(p_crit, TopsSpin.WobblePhase.TOPPLING, "掉到 ω_c 以下判定为「倾倒」")
+	h.eq(p_zero, TopsSpin.WobblePhase.TOPPLING, "停转判定为「倾倒」")
+
+	# 「还有血 ≠ 还有救」：这一档的关键价值就在这里
+	var spin_at_crit: float = TopsSpin.spin_of(wc)
+	h.ck(spin_at_crit > 1.0,
+			"倾倒档的转速还剩 %.1f 点（>0）—— 血没空但已经在倒了，光看血量看不出来"
+					% spin_at_crit)
+
+	# 结构无关：三原型的 ω_c 不同，但**按 ω/ω_c 归一**后档位必须一致
+	var same := true
+	for arch in [&"DART", &"BALANCED", &"RAM"]:
+		var ph2: Dictionary = _phys(arch)
+		var wc2: float = TopsSpin.critical_omega(ph2["m"], ph2["r"], ph2["I"], ph2["k"])
+		if TopsSpin.wobble_phase_of(wc2 * 0.5, wc2) != TopsSpin.WobblePhase.TOPPLING:
+			same = false
+		if TopsSpin.wobble_phase_of(wc2 * 1.2, wc2) != TopsSpin.WobblePhase.WOBBLING:
+			same = false
+		if TopsSpin.wobble_phase_of(wc2 * 2.0, wc2) != TopsSpin.WobblePhase.STEADY:
+			same = false
+	h.ck(same, "三个原型按 ω/ω_c 归一后档位一致（判定只认比例，不认绝对转速）")
+
+	# 真机：TopTop 上的包装能取到，且和物理层一致
+	var t := TopTop.create(&"BALANCED", 1)
+	t.spin = t.spin_max
+	h.eq(t.wobble_phase(), TopsSpin.WobblePhase.STEADY,
+			"真机 TopTop 满转速 → 稳定（%s）" % t.wobble_phase_name())
+	t.spin = TopsSpin.spin_of(t.omega_crit) * 0.5
+	h.eq(t.wobble_phase(), TopsSpin.WobblePhase.TOPPLING,
+			"真机 TopTop 半临界转速 → 倾倒（%s）" % t.wobble_phase_name())
+	t.spin = 0.0
+	h.eq(t.wobble_phase(), TopsSpin.WobblePhase.TOPPLING, "真机 TopTop 停转 → 倾倒")
+	t.free()
 
 
 # ══════════════════════════════════════════════════════════

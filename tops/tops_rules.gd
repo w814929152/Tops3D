@@ -80,6 +80,25 @@ static func slope_accel(p: Vector2, center: Vector2, arena_radius: float) -> Vec
 static var CONTACT_LOSS_SCALE := 0.10
 static var WALL_LOSS_SCALE := 0.25
 static var NATURAL_LOSS_SCALE := 1.00
+
+## ── 濒死惩罚：已经在摆 / 已经在倒的陀螺，挨一下掉得更多（可被补刀）──
+## 按 TopsSpin.WobblePhase 索引：稳定 1.0 / 摆头 1.20 / 倾倒 1.50。
+## 物理依据不是「摩擦变大」（那是 instability() 管的事），而是**抗冲击裕度没了**：
+##   稳稳睡着时，一次横向冲击只是削掉一点角动量，轴还能自己立回来；
+##   已经在倒的时候，同一次冲击直接把残余的角动量打散 → 立刻趴下。
+## 玩法价值：把「血条还有 11 点但已经必倒」这件事变成**可被对手利用的信息** ——
+##   濒死陀螺不再是「慢慢磨完最后一点血」，而是谁补一刀谁拿人头（击杀回血也归他）。
+## ⚠ 别把它调成 3.0 之类的激进值：那等于把出局线直接抬到 ω_c，
+##   对局会明显变短、缩圈阶段可能还没开始就打完了。
+const WOBBLE_DAMAGE_MULT: Array[float] = [1.0, 1.20, 1.50]
+
+
+## 按当前姿态取伤害倍率（互撞与撞墙两处都走它）
+static func damage_mult(t: TopTop) -> float:
+	var p: int = t.wobble_phase()
+	if p < 0 or p >= WOBBLE_DAMAGE_MULT.size():
+		return 1.0
+	return WOBBLE_DAMAGE_MULT[p]
 ## 轮缘摩擦「搓开」效应的强度。这是运动学不是损耗，默认给足 1.0；
 ## 调小它会让陀螺更容易互相顶住不分开。
 ## 2026-09-29 调到 1.20：对撞后沿切向刮开得更狠，画面上更像「被弹飞」。
@@ -257,10 +276,13 @@ static func resolve_contact(a: TopTop, b: TopTop) -> void:
 
 
 ## 把物理层算出的 Δω（rad/s）写回转速刻度，钳在 [0, spin_max]。
+## ⚠ 只用于**伤害**：击杀回血走的是 tops_main 里直接改 t.spin，不经过这里，
+##   所以在这一层乘「濒死惩罚」不会把回血也一起放大。
 static func apply_domega(t: TopTop, domega: float) -> void:
 	if not t.alive or domega == 0.0:
 		return
-	t.spin = clampf(t.spin + TopsSpin.spin_of(domega), 0.0, t.spin_max)
+	var dw: float = domega * damage_mult(t)
+	t.spin = clampf(t.spin + TopsSpin.spin_of(dw), 0.0, t.spin_max)
 
 
 ## 持续接触的轮询补结算。
@@ -324,7 +346,7 @@ static func apply_wall(t: TopTop) -> void:
 		vp = plane_vel(t)
 	var u_n: float = maxf(0.0, vp.dot(n))
 	var dw: float = TopsSpin.wall_domega(t.mass_kg, t.radius_m, t.axial_inertia, t.omega(), u_n)
-	t.spin = maxf(0.0, t.spin + TopsSpin.spin_of(dw * WALL_LOSS_SCALE))
+	t.spin = maxf(0.0, t.spin + TopsSpin.spin_of(dw * WALL_LOSS_SCALE * damage_mult(t)))
 	t.wall_cooldown = WALL_COOLDOWN
 	t.wall_hits += 1
 

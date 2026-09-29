@@ -219,6 +219,21 @@ func omega() -> float:
 	return TopsSpin.omega_of(spin)
 
 
+## 低转速三档判定（TopsSpin.WobblePhase）：稳定 / 摆头 / 倾倒。
+##
+## ⚠ **不缓存**：摆头本来只是渲染表现（_process 里用），但「倾倒」是一句
+##   玩法判断，缓存就得选 _process 还是 _physics_process，反而容易跟真实转速
+##   不同步（转速是在物理步里掉的）。这里按调用时刻的 omega() 现算，
+##   一次 sqrt 而已，比维护一份可能过期的状态可靠。
+func wobble_phase() -> TopsSpin.WobblePhase:
+	return TopsSpin.wobble_phase_of(omega(), omega_crit)
+
+
+## 判定档位的中文名（UI / 日志用）
+func wobble_phase_name() -> String:
+	return TopsSpin.WOBBLE_PHASE_NAMES[wobble_phase()]
+
+
 ## 发射阶段：陀螺在场地边缘待命，先不参与碰撞（免得还没发射就互相挤）
 func set_collides(on: bool) -> void:
 	collision_mask = 1 if on else 0
